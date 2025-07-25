@@ -138,6 +138,14 @@ else if(profit_growth > MAX_GROWTH)
         Print("Drawdown: ", drawdown);
         Print("Total Trades: ", sumtrades);
         Print("Profit Growth: ", profit_growth);
+        Print("=== VFI Parameters ===");
+        Print("VFI Filter Enabled: ", UseVFIFilter);
+        Print("VFI Length: ", VFI_Length);
+        Print("VFI Coefficient: ", VFI_Coef);
+        Print("VFI Volume Coefficient: ", VFI_VCoef);
+        Print("VFI Signal Length: ", VFI_SignalLength);
+        Print("VFI Strict Mode: ", VFI_StrictMode);
+        Print("VFI Use Real Volume: ", VFI_UseRealVolume);
         Print("Final Criterion: ", criterion);
     }
     
@@ -477,10 +485,21 @@ input bool FilterJPY = true;        // Check JPY News
 input bool FilterNZD = true;        // Check NZD News
 input bool FilterUSD = true;        // Check USD News
 
+// VFI Filter Settings  
+input group "=== VFI Filter Settings ==="
+input bool UseVFIFilter = true;               // Use VFI filter
+input int VFI_Length = 130;                   // VFI period length
+input double VFI_Coef = 0.2;                  // VFI coefficient
+input double VFI_VCoef = 2.5;                 // VFI volume coefficient (max)
+input int VFI_SignalLength = 5;               // VFI signal EMA length
+input bool VFI_UseRealVolume = true;          // Use real volume
+input bool VFI_StrictMode = false;            // Strict filtering mode (both VFI > EMA AND > 0)
+
 // Handles для индикаторов
 int EmaShortHandle;
 int EmaLongHandle;
 int RsiHandle;
+int VFIHandle;                               // VFI indicator handle
 
 // Глобальные переменные
 bool isTrailingOrderPlaced = false;
@@ -580,6 +599,176 @@ int OnInit()
     
     return(INIT_SUCCEEDED);
 }
+
+//+------------------------------------------------------------------+
+//| Calculate VFI (Volume Flow Indicator) value                     |
+//+------------------------------------------------------------------+
+double CalculateVFI(int index)
+{
+    static double vfi_buffer[];
+    static double vfi_ema_buffer[];
+    static bool initialized = false;
+    
+    if(!initialized)
+    {
+        ArraySetAsSeries(vfi_buffer, true);
+        ArraySetAsSeries(vfi_ema_buffer, true);
+        ArrayResize(vfi_buffer, VFI_Length + 50);
+        ArrayResize(vfi_ema_buffer, VFI_Length + 50);
+        initialized = true;
+    }
+    
+    // Get required data
+    MqlRates rates[];
+    ArraySetAsSeries(rates, true);
+    
+    int copied = CopyRates(_Symbol, PERIOD_CURRENT, index, VFI_Length + 10, rates);
+    if(copied < VFI_Length + 5) return 0.0;
+    
+    // Calculate VFI for current index
+    for(int i = 0; i < copied - 1; i++)
+    {
+        double typical_price = (rates[i].high + rates[i].low + rates[i].close) / 3.0;
+        double prev_typical_price = (rates[i+1].high + rates[i+1].low + rates[i+1].close) / 3.0;
+        
+        double price_change = typical_price - prev_typical_price;
+        double volume = VFI_UseRealVolume ? rates[i].real_volume : rates[i].tick_volume;
+        
+        // Ensure minimum volume
+        if(volume <= 0) volume = 1;
+        
+        // Calculate volume-weighted price change
+        double vcp = 0.0;
+        if(MathAbs(price_change) > VFI_Coef * _Point)
+        {
+            vcp = (price_change / _Point) * MathMin(volume, VFI_VCoef * volume);
+        }
+        
+        // Calculate VFI
+        double vfi_sum = 0.0;
+        int count = 0;
+        for(int j = i; j < MathMin(i + VFI_Length, copied - 1); j++)
+        {
+            double tp_j = (rates[j].high + rates[j].low + rates[j].close) / 3.0;
+            double prev_tp_j = (rates[j+1].high + rates[j+1].low + rates[j+1].close) / 3.0;
+            double pc_j = tp_j - prev_tp_j;
+            double vol_j = VFI_UseRealVolume ? rates[j].real_volume : rates[j].tick_volume;
+            if(vol_j <= 0) vol_j = 1;
+            
+            if(MathAbs(pc_j) > VFI_Coef * _Point)
+            {
+                vfi_sum += (pc_j / _Point) * MathMin(vol_j, VFI_VCoef * vol_j);
+            }
+            count++;
+        }
+        
+        vfi_buffer[i] = count > 0 ? vfi_sum / count : 0.0;
+        
+        // Calculate EMA of VFI
+        if(i == 0)
+        {
+            vfi_ema_buffer[i] = vfi_buffer[i];
+        }
+        else
+        {
+            double alpha = 2.0 / (VFI_SignalLength + 1.0);
+            vfi_ema_buffer[i] = alpha * vfi_buffer[i] + (1.0 - alpha) * vfi_ema_buffer[i-1];
+        }
+    }
+    
+    return vfi_buffer[0];
+}
+
+//+------------------------------------------------------------------+
+//| Get VFI EMA value                                               |
+//+------------------------------------------------------------------+
+double GetVFI_EMA(int index)
+{
+    static double vfi_ema_buffer[];
+    static bool initialized = false;
+    
+    if(!initialized)
+    {
+        ArraySetAsSeries(vfi_ema_buffer, true);
+        ArrayResize(vfi_ema_buffer, VFI_Length + 50);
+        initialized = true;
+    }
+    
+    // This will be calculated in CalculateVFI function
+    CalculateVFI(index);
+    
+    // Calculate EMA of VFI for the requested index
+    MqlRates rates[];
+    ArraySetAsSeries(rates, true);
+    
+    int copied = CopyRates(_Symbol, PERIOD_CURRENT, index, VFI_SignalLength + 5, rates);
+    if(copied < VFI_SignalLength) return 0.0;
+    
+    double ema = 0.0;
+    double alpha = 2.0 / (VFI_SignalLength + 1.0);
+    
+    for(int i = VFI_SignalLength - 1; i >= 0; i--)
+    {
+        double vfi_val = CalculateVFI(index + i);
+        if(i == VFI_SignalLength - 1)
+            ema = vfi_val;
+        else
+            ema = alpha * vfi_val + (1.0 - alpha) * ema;
+    }
+    
+    return ema;
+}
+
+//+------------------------------------------------------------------+
+//| Check VFI filter condition                                       |
+//+------------------------------------------------------------------+
+bool CheckVFIFilter(ENUM_ORDER_TYPE orderType)
+{
+    if(!UseVFIFilter) return true;
+    
+    double vfi_current = CalculateVFI(0);
+    double vfi_ema = GetVFI_EMA(0);
+    
+    bool vfi_condition = false;
+    
+    if(orderType == ORDER_TYPE_BUY)
+    {
+        if(VFI_StrictMode)
+        {
+            // Strict mode: VFI must be above EMA AND above zero
+            vfi_condition = (vfi_current > vfi_ema && vfi_current > 0.0);
+        }
+        else
+        {
+            // Soft mode: VFI above EMA OR above zero
+            vfi_condition = (vfi_current > vfi_ema || vfi_current > 0.0);
+        }
+    }
+    else if(orderType == ORDER_TYPE_SELL)
+    {
+        if(VFI_StrictMode)
+        {
+            // Strict mode: VFI must be below EMA AND below zero
+            vfi_condition = (vfi_current < vfi_ema && vfi_current < 0.0);
+        }
+        else
+        {
+            // Soft mode: VFI below EMA OR below zero
+            vfi_condition = (vfi_current < vfi_ema || vfi_current < 0.0);
+        }
+    }
+    
+    // Log VFI values for debugging
+    if(UseVFIFilter)
+    {
+        Print("VFI Filter Check - Current: ", NormalizeDouble(vfi_current, 4), 
+              " EMA: ", NormalizeDouble(vfi_ema, 4),
+              " Order: ", EnumToString(orderType),
+              " Condition: ", vfi_condition ? "PASS" : "FAIL");
+    }
+    
+    return vfi_condition;
+}
     
 void CheckForOpen()
 {
@@ -613,7 +802,15 @@ void CheckForOpen()
     }
 
     if(signal != WRONG_VALUE) {
-        OpenPosition(signal);
+        // Check VFI filter before opening position
+        if(CheckVFIFilter(signal))
+        {
+            OpenPosition(signal);
+        }
+        else
+        {
+            Print("Trade signal filtered out by VFI: ", EnumToString(signal));
+        }
     }
 }
 
@@ -922,6 +1119,16 @@ double CalculateLotSize(double stopLossPoints)
 void OpenPosition(ENUM_ORDER_TYPE orderType)
 {
     string logMessage = StringFormat("\n=== POSITION OPENING [%s] ===\n", TimeToString(TimeCurrent()));
+    
+    // Add VFI information to log
+    if(UseVFIFilter)
+    {
+        double vfi_current = CalculateVFI(0);
+        double vfi_ema = GetVFI_EMA(0);
+        logMessage += StringFormat("VFI Current: %.4f\n", vfi_current);
+        logMessage += StringFormat("VFI EMA: %.4f\n", vfi_ema);
+        logMessage += StringFormat("VFI Filter Mode: %s\n", VFI_StrictMode ? "Strict" : "Soft");
+    }
     
     // Получаем информацию о счете
     double accountBalance = AccountInfoDouble(ACCOUNT_BALANCE);
