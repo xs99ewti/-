@@ -560,6 +560,43 @@ int OnInit()
     if(!CheckTradeParameters())
         return(INIT_FAILED);
     
+    // Validate VFI parameters
+    if(UseVFIFilter)
+    {
+        if(VFI_Length <= 0)
+        {
+            Print("ERROR: VFI_Length must be greater than 0. Current value: ", VFI_Length);
+            return(INIT_FAILED);
+        }
+        if(VFI_SignalLength <= 0)
+        {
+            Print("ERROR: VFI_SignalLength must be greater than 0. Current value: ", VFI_SignalLength);
+            return(INIT_FAILED);
+        }
+        if(VFI_Coef <= 0)
+        {
+            Print("ERROR: VFI_Coef must be greater than 0. Current value: ", VFI_Coef);
+            return(INIT_FAILED);
+        }
+        if(VFI_VCoef <= 0)
+        {
+            Print("ERROR: VFI_VCoef must be greater than 0. Current value: ", VFI_VCoef);
+            return(INIT_FAILED);
+        }
+        
+        Print("VFI Filter initialized successfully:");
+        Print("- VFI Length: ", VFI_Length);
+        Print("- VFI Coefficient: ", VFI_Coef);
+        Print("- VFI Volume Coefficient: ", VFI_VCoef);
+        Print("- VFI Signal Length: ", VFI_SignalLength);
+        Print("- VFI Strict Mode: ", VFI_StrictMode ? "Enabled" : "Disabled");
+        Print("- VFI Use Real Volume: ", VFI_UseRealVolume ? "Yes" : "No");
+    }
+    else
+    {
+        Print("VFI Filter is disabled");
+    }
+    
     // Установка Magic Number для торговых операций
     trade.SetExpertMagicNumber(123456);
     
@@ -574,6 +611,14 @@ int OnInit()
     
     Print("EA initialized successfully. StopLoss=", StopLoss, " points");
     initialBalance = AccountInfoDouble(ACCOUNT_BALANCE);
+    
+    // Test VFI calculation if enabled
+    if(UseVFIFilter)
+    {
+        Print("Testing VFI calculation...");
+        TestVFICalculation();
+    }
+    
     return(INIT_SUCCEEDED);
     
     // Проверка наличия файла новостей для текущего месяца
@@ -680,8 +725,22 @@ bool CheckVFIFilter(ENUM_ORDER_TYPE orderType)
 {
     if(!UseVFIFilter) return true;
     
+    // Validate VFI parameters
+    if(VFI_Length <= 0 || VFI_SignalLength <= 0 || VFI_Coef <= 0 || VFI_VCoef <= 0)
+    {
+        Print("ERROR: Invalid VFI parameters. Filter disabled for this signal.");
+        return true; // Allow trading if parameters are invalid
+    }
+    
     double vfi_current = CalculateVFI(0);
     double vfi_ema = GetVFI_EMA(0);
+    
+    // Check for invalid values
+    if(vfi_current == 0.0 && vfi_ema == 0.0)
+    {
+        Print("WARNING: VFI calculation returned zero values. Allowing trade.");
+        return true; // Allow trading if calculation fails
+    }
     
     bool vfi_condition = false;
     
@@ -718,10 +777,35 @@ bool CheckVFIFilter(ENUM_ORDER_TYPE orderType)
         Print("VFI Filter Check - Current: ", NormalizeDouble(vfi_current, 4), 
               " EMA: ", NormalizeDouble(vfi_ema, 4),
               " Order: ", EnumToString(orderType),
+              " Mode: ", VFI_StrictMode ? "Strict" : "Soft",
               " Condition: ", vfi_condition ? "PASS" : "FAIL");
     }
     
     return vfi_condition;
+}
+
+//+------------------------------------------------------------------+
+//| Test VFI calculation (for debugging)                            |
+//+------------------------------------------------------------------+
+void TestVFICalculation()
+{
+    if(!UseVFIFilter) return;
+    
+    Print("=== VFI Calculation Test ===");
+    
+    double vfi_current = CalculateVFI(0);
+    double vfi_ema = GetVFI_EMA(0);
+    
+    Print("VFI Current Value: ", NormalizeDouble(vfi_current, 6));
+    Print("VFI EMA Value: ", NormalizeDouble(vfi_ema, 6));
+    
+    // Test both buy and sell conditions
+    bool buy_condition = CheckVFIFilter(ORDER_TYPE_BUY);
+    bool sell_condition = CheckVFIFilter(ORDER_TYPE_SELL);
+    
+    Print("Buy condition: ", buy_condition ? "PASS" : "FAIL");
+    Print("Sell condition: ", sell_condition ? "PASS" : "FAIL");
+    Print("=== End VFI Test ===");
 }
     
 void CheckForOpen()
