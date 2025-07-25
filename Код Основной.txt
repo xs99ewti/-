@@ -1,0 +1,1989 @@
+//+------------------------------------------------------------------+
+//|                                               EMA + RSI Expert.mq5 |
+//|                                                         Dubravaspb |
+//|                                                                    |
+//+------------------------------------------------------------------+
+#property copyright "Dubravaspb"
+#property link      ""
+#property version   "1.00"
+#property description "Created: 2025-02-06 18:24:08"
+#property description "Author: Dubravaspb"
+#property description "Last Modified: 2025-03-06 13:00:20"
+#property description "Modified by: Chupapimunianu"
+
+double OnTester()
+{
+    // Get basic statistics
+    double profit = TesterStatistics(STAT_PROFIT);                     
+    double profitable_trades = TesterStatistics(STAT_PROFIT_TRADES);   
+    double loss_trades = TesterStatistics(STAT_LOSS_TRADES);          
+    double drawdown = TesterStatistics(STAT_BALANCE_DDREL_PERCENT);   
+    double sumtrades = TesterStatistics(STAT_TRADES);                 
+    double depozit = TesterStatistics(STAT_INITIAL_DEPOSIT);
+    double lossposled = TesterStatistics(STAT_MAX_CONLOSS_TRADES);
+    
+    // Проверка на ноль
+if(lossposled == 0)
+{
+    lossposled = 1; // или другое безопасное значение по умолчанию
+}
+    
+    // Store profit sign for later use
+    double profit_sign = (profit >= 0) ? 1.0 : -1.0;
+    
+    // Use absolute profit value for calculations
+    profit = MathAbs(profit);
+    double totalsum = profit + depozit;
+    
+    // Initialize penalties
+    double tp_sl_penalty = 1.0;
+    double win_rate_penalty = 1.0;
+    double trade_deficit_penalty = 1.0;
+    double trend_penalty = 1.0;
+    
+    // Calculate win rate
+    double whitewin = (sumtrades == 0) ? 0.0 : profitable_trades / sumtrades;
+    
+    // Set minimum drawdown to 1%
+    if(drawdown < 1.1)
+        drawdown = 1.0;
+    
+    // Calculate win/loss ratio
+    double win_loss_ratio = (loss_trades == 0) ? profitable_trades : profitable_trades / loss_trades;
+    
+    // Calculate TP/SL ratio
+    double tp = TakeProfit * _Point;
+    double sl = StopLoss * _Point;
+    double tp_sl_ratio = (sl == 0) ? tp : tp / sl;
+    
+    // Calculate Sharpe Ratio
+    double sharpe_ratio = (drawdown == 0) ? profit : profit / drawdown;
+    
+    // Apply adaptive TP/SL penalty
+    if(tp_sl_ratio < 1.0)
+    {
+        tp_sl_penalty = 1.0 / tp_sl_ratio * 10.0;  // Higher penalty for TP/SL < 1
+    }
+    else if(tp_sl_ratio > 5.0)
+    {
+        tp_sl_penalty = tp_sl_ratio * 10.0;  // Triple penalty for TP/SL > 5
+    }
+    
+    // Apply adaptive win rate penalty
+    if(whitewin < 0.5)
+    {
+        win_rate_penalty = 10.0 / whitewin;
+    }
+    
+    // Apply adaptive trade count penalty
+    double minimum_required_trades = 72.0;
+    if(sumtrades < minimum_required_trades)
+    {
+        trade_deficit_penalty = (minimum_required_trades / sumtrades) * 10.0;
+    }
+    
+      
+    // Calculate initial criterion
+    double criterion = 0;
+    if(drawdown != 0)
+        criterion = profit * whitewin * profitable_trades / drawdown;
+    else
+        criterion = profit * whitewin * profitable_trades;
+    
+    // Apply all penalties
+    criterion /= (tp_sl_penalty * win_rate_penalty * trade_deficit_penalty * lossposled);
+    
+    // Define constants for better readability
+double MIN_GROWTH = 1.20;
+double MAX_GROWTH = 1.60;
+
+// Apply profit growth check
+double profit_growth = pow(totalsum / depozit, 1/1);
+
+if(profit_growth < MIN_GROWTH)
+{
+    criterion /= (1 + (MIN_GROWTH - profit_growth)) * 10;
+}
+else if(profit_growth > MAX_GROWTH)
+{
+    criterion /= (1 + (profit_growth - MAX_GROWTH)) * 10;
+}
+    
+    // Apply trailing stop check
+    if(TrailingStopCoef < 0.6)
+    {
+        criterion /= 1.0;
+    }
+    
+    // Include Sharpe Ratio in final calculation
+    criterion *= sharpe_ratio;
+    
+    // Apply the original profit sign to the final criterion
+    criterion *= profit_sign;
+    
+    // Debug logging
+    if(MQLInfoInteger(MQL_DEBUG))
+    {
+        Print("=== OnTester Enhanced Calculation Details ===");
+        Print("Original Profit: ", TesterStatistics(STAT_PROFIT));
+        Print("Profit Sign: ", profit_sign);
+        Print("Win Rate: ", whitewin);
+        Print("Win/Loss Ratio: ", win_loss_ratio);
+        Print("TP/SL Ratio: ", tp_sl_ratio);
+        Print("TP/SL Penalty: ", tp_sl_penalty);
+        Print("Win Rate Penalty: ", win_rate_penalty);
+        Print("Trade Deficit Penalty: ", trade_deficit_penalty);
+        Print("Trend Penalty: ", trend_penalty);
+        Print("Sharpe Ratio: ", sharpe_ratio);
+        Print("Drawdown: ", drawdown);
+        Print("Total Trades: ", sumtrades);
+        Print("Profit Growth: ", profit_growth);
+        Print("Final Criterion: ", criterion);
+    }
+    
+    return criterion;
+}
+
+
+#include <Trade\Trade.mqh>
+#include <Arrays\ArrayObj.mqh>
+
+// Торговый объект
+CTrade trade;
+
+// Структура для хранения новости
+struct SNewsEvent 
+{
+    datetime time;           // Время новости
+    string currency;         // Валюта
+    string title;           // Название новости
+    string impact;          // Важность
+    string forecast;        // Прогноз
+    string previous;        // Предыдущее значение
+};
+
+// Глобальные переменные для новостного фильтра
+SNewsEvent news[];          // Массив новостей
+datetime lastUpdate = 0;    // Время последнего обновления новостей
+int newsCount = 0;         // Количество загруженных новостей
+datetime nextNewsUpdate;    // Время следующего обновления новостей
+string currentNewsFile;     // Текущий загруженный файл новостей
+
+// Объявляем глобальные переменные для хранения статистики
+double initialBalance;
+int profitableTrades = 0;
+int lossTrades = 0;
+
+// Параметры для отображения информации о новостях
+input group "=== News Settings ==="
+input int UpdateHours = 6;              // Часов между обновлениями новостей
+input bool ShowNewsInfo = true;         // Показывать информацию о новостях
+input color NewsTextColor = clrRed;     // Цвет текста новостей
+
+// Параметры отключения в середине дня
+input group "=== Mid-Day Break Settings ==="
+input bool   UseMidDayBreak = true;          // Использовать перерыв в середине дня
+input string MidDayBreakStart = "12:00";     // Время начала перерыва
+input string MidDayBreakEnd = "13:00";       // Время окончания перерыва
+
+// EUR News Settings
+input group "=== EUR News Settings ==="
+input bool UseEURFilter = true;               // Включить фильтр EUR новостей
+input bool EUR_NonEconomic = false;           // EUR - Неэкономические новости
+input bool EUR_Low = false;                   // EUR - Низкая важность
+input bool EUR_Medium = false;                // EUR - Средняя важность
+input bool EUR_High = true;                   // EUR - Высокая важность
+input int EUR_MinutesBefore = 60;             // EUR - Минут до новости
+input int EUR_MinutesAfter = 30;              // EUR - Минут после новости
+
+// USD News Settings
+input group "=== USD News Settings ==="
+input bool UseUSDFilter = true;               // Включить фильтр USD новостей
+input bool USD_NonEconomic = false;           // USD - Неэкономические новости
+input bool USD_Low = false;                   // USD - Низкая важность
+input bool USD_Medium = false;                // USD - Средняя важность
+input bool USD_High = true;                   // USD - Высокая важность
+input int USD_MinutesBefore = 60;             // USD - Минут до новости
+input int USD_MinutesAfter = 91;              // USD - Минут после новости
+
+// GBP News Settings
+input group "=== GBP News Settings ==="
+input bool UseGBPFilter = true;               // Включить фильтр GBP новостей
+input bool GBP_NonEconomic = false;           // GBP - Неэкономические новости
+input bool GBP_Low = false;                   // GBP - Низкая важность
+input bool GBP_Medium = false;                // GBP - Средняя важность
+input bool GBP_High = true;                   // GBP - Высокая важность
+input int GBP_MinutesBefore = 60;             // GBP - Минут до новости
+input int GBP_MinutesAfter = 30;              // GBP - Минут после новости
+
+// JPY News Settings
+input group "=== JPY News Settings ==="
+input bool UseJPYFilter = true;               // Включить фильтр JPY новостей
+input bool JPY_NonEconomic = false;           // JPY - Неэкономические новости
+input bool JPY_Low = false;                   // JPY - Низкая важность
+input bool JPY_Medium = false;                // JPY - Средняя важность
+input bool JPY_High = true;                   // JPY - Высокая важность
+input int JPY_MinutesBefore = 60;             // JPY - Минут до новости
+input int JPY_MinutesAfter = 30;              // JPY - Минут после новости
+
+// CHF News Settings
+input group "=== CHF News Settings ==="
+input bool UseCHFFilter = true;               // Включить фильтр CHF новостей
+input bool CHF_NonEconomic = false;           // CHF - Неэкономические новости
+input bool CHF_Low = false;                   // CHF - Низкая важность
+input bool CHF_Medium = false;                // CHF - Средняя важность
+input bool CHF_High = true;                   // CHF - Высокая важность
+input int CHF_MinutesBefore = 60;             // CHF - Минут до новости
+input int CHF_MinutesAfter = 30;              // CHF - Минут после новости
+
+// AUD News Settings
+input group "=== AUD News Settings ==="
+input bool UseAUDFilter = true;               // Включить фильтр AUD новостей
+input bool AUD_NonEconomic = false;           // AUD - Неэкономические новости
+input bool AUD_Low = false;                   // AUD - Низкая важность
+input bool AUD_Medium = false;                // AUD - Средняя важность
+input bool AUD_High = true;                   // AUD - Высокая важность
+input int AUD_MinutesBefore = 60;             // AUD - Минут до новости
+input int AUD_MinutesAfter = 30;              // AUD - Минут после новости
+
+// CAD News Settings
+input group "=== CAD News Settings ==="
+input bool UseCADFilter = true;               // Включить фильтр CAD новостей
+input bool CAD_NonEconomic = false;           // CAD - Неэкономические новости
+input bool CAD_Low = false;                   // CAD - Низкая важность
+input bool CAD_Medium = false;                // CAD - Средняя важность
+input bool CAD_High = true;                   // CAD - Высокая важность
+input int CAD_MinutesBefore = 60;             // CAD - Минут до новости
+input int CAD_MinutesAfter = 30;              // CAD - Минут после новости
+
+// NZD News Settings
+input group "=== NZD News Settings ==="
+input bool UseNZDFilter = true;               // Включить фильтр NZD новостей
+input bool NZD_NonEconomic = false;           // NZD - Неэкономические новости
+input bool NZD_Low = false;                   // NZD - Низкая важность
+input bool NZD_Medium = false;                // NZD - Средняя важность
+input bool NZD_High = true;                   // NZD - Высокая важность
+input int NZD_MinutesBefore = 60;             // NZD - Минут до новости
+input int NZD_MinutesAfter = 30;              // NZD - Минут после новости
+
+// CNY News Settings
+input group "=== CNY News Settings ==="
+input bool UseCNYFilter = true;               // Включить фильтр CNY новостей
+input bool CNY_NonEconomic = false;           // CNY - Неэкономические новости
+input bool CNY_Low = false;                   // CNY - Низкая важность
+input bool CNY_Medium = false;                // CNY - Средняя важность
+input bool CNY_High = true;                   // CNY - Высокая важность
+input int CNY_MinutesBefore = 60;             // CNY - Минут до новости
+input int CNY_MinutesAfter = 30;              // CNY - Минут после новости
+
+input group "=== News Protection Settings ==="
+input bool UseNewsProtectionPlus = true;     // Использовать защитный плюс при новостях
+input int NewsProtectionPlusPoints = 15;     // Защитный плюс при новостях (в пунктах)
+
+// Типы цен для MA
+enum ENUM_APPLIED_PRICE_CUSTOM  // Перечисление для пользовательских типов цен
+{
+    PRICE_CLOSE_CUSTOM = PRICE_CLOSE,        // Close
+    PRICE_OPEN_CUSTOM = PRICE_OPEN,          // Open
+    PRICE_HIGH_CUSTOM = PRICE_HIGH,          // High
+    PRICE_LOW_CUSTOM = PRICE_LOW,            // Low
+    PRICE_MEDIAN_CUSTOM = PRICE_MEDIAN,      // Median (HL/2)
+    PRICE_TYPICAL_CUSTOM = PRICE_TYPICAL,    // Typical (HLC/3)
+    PRICE_WEIGHTED_CUSTOM = PRICE_WEIGHTED   // Weighted (HLCC/4)
+};
+enum TypeOfMA //Type of MA
+  {
+   AMA,//Adaptive Moving Average
+   DEMA,// Double Exponential Moving Average
+   FraMA,//Fractal Adaptive Moving Average 
+   MA,//Moving Average 
+   TEMA,//Triple Exponential Moving Average
+   VIDYA,//Variable Index Dynamic Average
+   NRMA//Nick Rypock Moving Average
+  }; 
+enum Smooth_Method //averaging method for NRMA
+  {
+   MODE_SMA_,  //SMA
+   MODE_EMA_,  //EMA
+   MODE_SMMA_, //SMMA
+   MODE_LWMA_, //LWMA
+   MODE_JJMA,  //JJMA
+   MODE_JurX,  //JurX
+   MODE_ParMA, //ParMA
+   MODE_T3,    //T3
+   MODE_VIDYA, //VIDYA
+   MODE_AMA,   //AMA
+  };
+enum Applied_price_ //Prices series for NRMA
+  {
+   PRICE_CLOSE_ = 1,     //close
+   PRICE_OPEN_,          //Open
+   PRICE_HIGH_,          //High
+   PRICE_LOW_,           //Low
+   PRICE_MEDIAN_,        //Median Price (HL/2)
+   PRICE_TYPICAL_,       //Typical Price (HLC/3)
+   PRICE_WEIGHTED_,      //Weighted Close (HLCC/4)
+   PRICE_SIMPL_,         //Simpl Price (OC/2)
+   PRICE_QUARTER_,       //Quarted Price (HLOC/4) 
+   PRICE_TRENDFOLLOW0_,  //TrendFollow_1 Price 
+   PRICE_TRENDFOLLOW1_,  //TrendFollow_2 Price
+   PRICE_DEMARK_         //Demark Price
+  };
+
+// Параметры управления рисками
+input group "=== Risk Management ==="
+input double RiskPercent = 1.0;          // Риск на сделку (в процентах)
+input bool UseFixedLot = false;          // Использовать фиксированный лот
+input double FixedLotSize = 0.1;         // Размер фиксированного лота
+input double LotReductionPercent = 0.0;  // Процент уменьшения лота (0-100)
+
+// Add these new parameters
+input group "=== Moving Average Settings ==="
+input TypeOfMA Type_MA = AMA;  // Type of Moving Average
+
+// Parameters for AMA
+input int AMA_PeriodMA = 14;        // AMA: Period of averaging
+input int AMA_PeriodFast = 2;       // AMA: Period of fast EMA
+input int AMA_PeriodSlow = 30;      // AMA: Period of slow EMA
+input int AMA_Shift = 0;            // AMA: Time shift
+input ENUM_APPLIED_PRICE AMA_Applied = PRICE_CLOSE; // AMA: Price type
+
+// Parameters for DEMA
+input int DEMA_PeriodMA = 28;       // DEMA: Period of averaging
+input int DEMA_Shift = 0;           // DEMA: Time shift
+input ENUM_APPLIED_PRICE DEMA_Applied = PRICE_CLOSE; // DEMA: Price type
+
+// Parameters for FraMA
+input int FraMA_PeriodMA = 16;      // FraMA: Period of averaging
+input int FraMA_Shift = 0;          // FraMA: Time shift
+input ENUM_APPLIED_PRICE FraMA_Applied = PRICE_CLOSE; // FraMA: Price type
+
+// Parameters for MA
+input int MA_PeriodMA = 15;         // MA: Period of averaging
+input int MA_Shift = 0;             // MA: Time shift
+input ENUM_MA_METHOD MA_Method = MODE_SMA; // MA: Method
+input ENUM_APPLIED_PRICE MA_Applied = PRICE_CLOSE; // MA: Price type
+
+input Smooth_Method      NRMA_Method            =MODE_SMA_;                     //NRMA Method of averaging
+input int                XLength                =3;                             //NRMA Depth of smoothing                 
+input int                XPhase                 =15;                            //NRMA Parameter of smoothing
+input Applied_price_     IPC                    =PRICE_CLOSE_;                  //NRMA Prices series
+input double             Kf                     =1;                             //NRMA coefficient of the sliding filter (NRTR)
+input double             Fast                   =12;                            //NRMA Factor of smoothing 
+input double             Sharp                  =2;                             //NRMA Degree of dynamism of the oscillator
+input int                Shift                  =0;                             //NRMA Horizontal shift in bars
+input int                PriceShift             =0;                             //NRMA vertical shift in points
+
+// Parameters for TEMA
+input int TEMA_PeriodMA = 44;       // TEMA: Period of averaging
+input int TEMA_Shift = 0;           // TEMA: Time shift
+input ENUM_APPLIED_PRICE TEMA_Applied = PRICE_CLOSE; // TEMA: Price type
+
+// Parameters for VIDYA
+input int VIDYA_InpPeriodCMO = 11;  // VIDYA: Period CMO
+input int VIDYA_InpPeriodEMA = 27;  // VIDYA: Period EMA
+input int VIDYA_InpShift = 0;       // VIDYA: Shift
+input ENUM_APPLIED_PRICE VIDYA_Applied = PRICE_CLOSE; // VIDYA: Price type
+
+input int RsiMiddle = 50; // Средний уровень для RSI
+
+// Growth factor
+input double GFactor = 0.0001;      // Growth factor
+
+// Update handles declaration
+int MAHandle;        // Single handle for current MA type
+
+// Параметры торговли
+input group "=== Trade Parameters ==="
+input int StopLoss = 1300;         // Стоп лосс (в пунктах)
+input int TakeProfit = 200;        // Тейк профит (в пунктах)
+input bool UseFixedTP = true;      // Использовать фиксированный тейк профит
+input bool UseTrailingOrder = true; // Использовать Trailing Order
+input int TrailingOrderDistance = 30; // Расстояние для Trailing Order (в пунктах)
+
+// Параметры trailing stop
+input group "=== Trailing Stop Parameters ==="
+input double TrailingStopCoef = 1.0;    // Коэффициент trailing stop (0 - отключен)
+
+// Добавьте это перечисление в начало кода, после описания других enum
+enum ENUM_TRADE_HOURS
+{
+   H00 = 0,   // 00:00
+   H01 = 1,   // 01:00
+   H02 = 2,   // 02:00
+   H03 = 3,   // 03:00
+   H04 = 4,   // 04:00
+   H05 = 5,   // 05:00
+   H06 = 6,   // 06:00
+   H07 = 7,   // 07:00
+   H08 = 8,   // 08:00
+   H09 = 9,   // 09:00
+   H10 = 10,  // 10:00
+   H11 = 11,  // 11:00
+   H12 = 12,  // 12:00
+   H13 = 13,  // 13:00
+   H14 = 14,  // 14:00
+   H15 = 15,  // 15:00
+   H16 = 16,  // 16:00
+   H17 = 17,  // 17:00
+   H18 = 18,  // 18:00
+   H19 = 19,  // 19:00
+   H20 = 20,  // 20:00
+   H21 = 21,  // 21:00
+   H22 = 22,  // 22:00
+   H23 = 23   // 23:00
+};
+
+// Замените существующие input параметры для времени торговли на следующие:
+input group "=== Trading Schedule ==="
+// Понедельник
+input bool Monday_Enabled = true;           // Торговать в понедельник
+input ENUM_TRADE_HOURS Monday_StartHour = H04;    // Час начала (Понедельник)
+input ENUM_TRADE_HOURS Monday_EndHour = H20;      // Час окончания (Понедельник)
+// Вторник
+input bool Tuesday_Enabled = true;          // Торговать во вторник
+input ENUM_TRADE_HOURS Tuesday_StartHour = H04;   // Час начала (Вторник)
+input ENUM_TRADE_HOURS Tuesday_EndHour = H20;     // Час окончания (Вторник)
+// Среда
+input bool Wednesday_Enabled = true;        // Торговать в среду
+input ENUM_TRADE_HOURS Wednesday_StartHour = H04; // Час начала (Среда)
+input ENUM_TRADE_HOURS Wednesday_EndHour = H20;   // Час окончания (Среда)
+// Четверг
+input bool Thursday_Enabled = true;         // Торговать в четверг
+input ENUM_TRADE_HOURS Thursday_StartHour = H04;  // Час начала (Четверг)
+input ENUM_TRADE_HOURS Thursday_EndHour = H20;    // Час окончания (Четверг)
+// Пятница
+input bool Friday_Enabled = true;           // Торговать в пятницу
+input ENUM_TRADE_HOURS Friday_StartHour = H04;    // Час начала (Пятница)
+input ENUM_TRADE_HOURS Friday_EndHour = H20;      // Час окончания (Пятница)
+
+// Добавляем новые параметры для проверки новостей по дням недели
+input group "=== News Check Schedule ==="
+input bool Monday_CheckNews = true;        // Проверять новости в понедельник
+input bool Tuesday_CheckNews = true;       // Проверять новости во вторник
+input bool Wednesday_CheckNews = true;     // Проверять новости в среду
+input bool Thursday_CheckNews = true;      // Проверять новости в четверг
+input bool Friday_CheckNews = true;        // Проверять новости в пятницу
+
+// Currency Filter Settings
+input group "=== Currency Filter Settings ==="
+input bool FilterAUD = true;        // Check AUD News
+input bool FilterCAD = true;        // Check CAD News
+input bool FilterCHF = true;        // Check CHF News
+input bool FilterCNY = true;        // Check CNY News
+input bool FilterEUR = true;        // Check EUR News
+input bool FilterGBP = true;        // Check GBP News
+input bool FilterJPY = true;        // Check JPY News
+input bool FilterNZD = true;        // Check NZD News
+input bool FilterUSD = true;        // Check USD News
+
+// Handles для индикаторов
+int EmaShortHandle;
+int EmaLongHandle;
+int RsiHandle;
+
+// Глобальные переменные
+bool isTrailingOrderPlaced = false;
+double trailingOrderLot = 0.0;
+datetime lastBarTime = 0;
+double initialTradePrice = 0;    // Цена первоначальной сделки
+double averageEntryPrice = 0;    // Средняя цена входа
+double initialStopLoss = 0;      // Начальный стоп-лосс в пунктах
+int totalTrailingOrders = 0;     // Количество открытых trailing ордеров
+bool isDayChanged = false;       // Флаг смены дня
+int CurrentTrailingStop = 0;     // Текущее значение trailing stop
+int CurrentTrailingStart = 0;    // Текущее значение начала trailing
+
+// ID объектов для отображения информации о новостях
+string newsLabelBase = "NewsInfo_";
+int newsLabelsCount = 0;
+
+input bool Check_Single_Currency_News = true;
+
+//+------------------------------------------------------------------+
+//| Expert initialization function                                     |
+//+------------------------------------------------------------------+
+int OnInit()
+{
+    // Initialize MA handle based on selected type
+    switch(Type_MA)
+{
+    case AMA:
+        MAHandle = iAMA(_Symbol, PERIOD_CURRENT, AMA_PeriodMA, AMA_PeriodFast, AMA_PeriodSlow, AMA_Shift, AMA_Applied);
+        break;
+    case DEMA:
+        MAHandle = iDEMA(_Symbol, PERIOD_CURRENT, DEMA_PeriodMA, DEMA_Shift, DEMA_Applied);
+        break;
+    case FraMA:
+        MAHandle = iFrAMA(_Symbol, PERIOD_CURRENT, FraMA_PeriodMA, FraMA_Shift, FraMA_Applied);
+        break;
+    case MA:
+        MAHandle = iMA(_Symbol, PERIOD_CURRENT, MA_PeriodMA, MA_Shift, MA_Method, MA_Applied);
+        break;
+    case TEMA:
+        MAHandle = iTEMA(_Symbol, PERIOD_CURRENT, TEMA_PeriodMA, TEMA_Shift, TEMA_Applied);
+        break;
+    case VIDYA:
+        MAHandle = iVIDyA(_Symbol, PERIOD_CURRENT, VIDYA_InpPeriodCMO, VIDYA_InpPeriodEMA, VIDYA_InpShift, VIDYA_Applied);
+        break;
+    case NRMA:
+        MAHandle = iCustom(_Symbol, PERIOD_CURRENT, "Examples\\nrma", NRMA_Method, XLength, XPhase, IPC, Kf, Fast, Sharp, Shift, PriceShift);
+        break;
+}
+
+    if(MAHandle == INVALID_HANDLE)
+    {
+        Print("Error creating MA indicator");
+        return(INIT_FAILED);
+    }
+    
+    // Проверка и настройка режимов исполнения
+    if(!CheckTradeParameters())
+        return(INIT_FAILED);
+    
+    // Установка Magic Number для торговых операций
+    trade.SetExpertMagicNumber(123456);
+    
+    // Инициализация времени обновления новостей
+    nextNewsUpdate = 0;
+    
+    // Первоначальное обновление новостей
+    if(ShowNewsInfo)
+    {
+        UpdateNews(); // Убираем проверку на возвращаемое значение
+    }
+    
+    Print("EA initialized successfully. StopLoss=", StopLoss, " points");
+    initialBalance = AccountInfoDouble(ACCOUNT_BALANCE);
+    return(INIT_SUCCEEDED);
+    
+    // Проверка наличия файла новостей для текущего месяца
+    if(ShowNewsInfo)
+    {
+        datetime currentTime = TimeCurrent();
+        MqlDateTime dt;
+        TimeToStruct(currentTime, dt);
+        string filename = StringFormat("news_%04d%02d.txt", dt.year, dt.mon);
+        
+        if(!FileIsExist(filename))
+        {
+            Print("Warning: News file not found: ", filename);
+            Print("Please make sure news files are in the /Files directory");
+        }
+        
+        if(!UpdateNews())
+        {
+            Print("Failed to initialize news data");
+            return(INIT_FAILED);
+        }
+    }
+    
+    return(INIT_SUCCEEDED);
+}
+    
+void CheckForOpen()
+{
+    MqlRates rt[2];
+    double ma[2];
+    if(CopyRates(_Symbol, PERIOD_CURRENT, 0, 2, rt) != 2) return;
+    if(CopyBuffer(MAHandle, 0, 0, 2, ma) != 2) return;
+
+    static bool SellCross = false;
+    static bool BuyCross = false;
+    ENUM_ORDER_TYPE signal = WRONG_VALUE;
+    // Медвежий крест: тело свечи вниз через MA
+    if(rt[0].open > ma[0] && rt[0].close < ma[0]) {
+        if(BuyCross) BuyCross = false;
+        SellCross = true;
+    }
+    // Бычий крест: тело свечи вверх через MA
+    else if(rt[0].open < ma[0] && rt[0].close > ma[0]) {
+        if(SellCross) SellCross = false;
+        BuyCross = true;
+    }
+    // Условие на продажу
+    if(SellCross && ma[0] > ma[1] && ma[0]-ma[1] > GFactor) {
+        signal = ORDER_TYPE_SELL;
+        SellCross = false;
+    }
+    // Условие на покупку
+    else if(BuyCross && ma[1] > ma[0] && ma[1]-ma[0] > GFactor) {
+        signal = ORDER_TYPE_BUY;
+        BuyCross = false;
+    }
+
+    if(signal != WRONG_VALUE) {
+        OpenPosition(signal);
+    }
+}
+
+void CheckForClose()
+{
+    MqlRates rt[2];
+    double ma[1];
+    if(CopyRates(_Symbol, PERIOD_CURRENT, 0, 2, rt) != 2) return;
+    if(CopyBuffer(MAHandle, 0, 0, 1, ma) != 1) return;
+
+    long type = PositionGetInteger(POSITION_TYPE);
+    bool signal = false;
+
+    if(type == POSITION_TYPE_BUY && rt[0].open > ma[0] && rt[0].close < ma[0])
+        signal = true;
+    if(type == POSITION_TYPE_SELL && rt[0].open < ma[0] && rt[0].close > ma[0])
+        signal = true;
+
+    if(signal)
+        trade.PositionClose(_Symbol, 3);
+}
+
+//+------------------------------------------------------------------+
+//| Expert deinitialization function                                   |
+//+------------------------------------------------------------------+
+void OnDeinit(const int reason)
+{
+    // Освобождаем хэндлы индикаторов
+    IndicatorRelease(EmaShortHandle);
+    IndicatorRelease(EmaLongHandle);
+    IndicatorRelease(RsiHandle);
+    
+    // Удаляем все информационные метки
+    DeleteNewsLabels();
+    
+    Print("EA deinitialized with reason code: ", reason);
+}
+
+//+------------------------------------------------------------------+
+//| Expert tick function                                              |
+//+------------------------------------------------------------------+
+void OnTick()
+{
+    static datetime lastDayTime = 0;
+    datetime currentTime = TimeCurrent();
+    
+    // Обновляем новости каждые UpdateHours часов
+    if(ShowNewsInfo && currentTime >= nextNewsUpdate)
+    {
+        UpdateNews();
+    }
+    
+    // Проверяем смену дня
+    MqlDateTime current;
+    TimeToStruct(currentTime, current);
+    
+    if(lastDayTime == 0)
+    {
+        lastDayTime = currentTime;
+        PrintFormat("EA started on %d-%02d-%02d", current.year, current.mon, current.day);
+    }
+    else
+    {
+        MqlDateTime last;
+        TimeToStruct(lastDayTime, last);
+        
+        if(current.day != last.day)
+        {
+            lastDayTime = currentTime;
+            isDayChanged = true;
+            PrintFormat("New trading day detected: %d-%02d-%02d", current.year, current.mon, current.day);
+        }
+    }
+    
+    // Обновляем новости каждые UpdateHours часов
+    if(ShowNewsInfo && currentTime >= nextNewsUpdate)
+    {
+        UpdateNews();
+    }
+
+    // Проверяем наличие открытых позиций
+    bool hasOpenPositions = false;
+    for(int i = PositionsTotal() - 1; i >= 0; i--)
+    {
+        ulong ticket = PositionGetTicket(i);
+        if(PositionSelectByTicket(ticket))
+        {
+            if(PositionGetString(POSITION_SYMBOL) == _Symbol && 
+               PositionGetInteger(POSITION_MAGIC) == 123456)
+            {
+                hasOpenPositions = true;
+                break;
+            }
+        }
+    }
+
+    // Если есть открытые позиции, обрабатываем их независимо от времени
+    if(hasOpenPositions)
+    {
+        UpdateTrailingStop();
+        
+        if(UseTrailingOrder)
+            CheckTrailingOrder();
+    }
+
+    // Проверяем торговое время и наличие важных новостей
+    if(!IsTradeTime() || IsNewsTime())
+    {
+        if(IsNewsTime())
+            Print("Trading paused due to upcoming/active news");
+        return;
+    }
+
+    // Проверяем наличие новостей на текущий день
+    if(!HasNewsForCurrentDay())
+    {
+        return;
+    }
+    
+    // Получаем информацию о текущем баре
+    datetime currentBarTime = iTime(_Symbol, PERIOD_CURRENT, 0);
+    bool isNewBar = (currentBarTime != lastBarTime);
+    MqlDateTime barTime;
+    TimeToStruct(currentBarTime, barTime);
+    bool isBarStart = (currentTime - currentBarTime) < 60;
+    
+    if(isNewBar && isBarStart)
+{
+    if(hasOpenPositions)
+        CheckForClose();
+    else
+        CheckForOpen();
+    lastBarTime = currentBarTime;
+}
+    
+    // Обновляем отображение информации о новостях
+    if(ShowNewsInfo)
+        UpdateNewsDisplay();
+}
+
+//+------------------------------------------------------------------+
+//| Проверка перерыва в середине дня                                  |
+//+------------------------------------------------------------------+
+bool IsMidDayBreak()
+{
+    if(!UseMidDayBreak)
+        return false;
+        
+    if(!CheckTimeString(MidDayBreakStart) || !CheckTimeString(MidDayBreakEnd))
+    {
+        Print("Invalid mid-day break time format");
+        return false;
+    }
+    
+    datetime currentTime = TimeCurrent();
+    string currentDate = TimeToString(currentTime, TIME_DATE);
+    
+    datetime breakStart = StringToTime(currentDate + " " + MidDayBreakStart);
+    datetime breakEnd = StringToTime(currentDate + " " + MidDayBreakEnd);
+    
+    return (currentTime >= breakStart && currentTime <= breakEnd);
+}
+
+//+------------------------------------------------------------------+
+//| Расчет доступного баланса с учетом открытых позиций              |
+//+------------------------------------------------------------------+
+double CalculateAvailableBalance()
+{
+    double accountEquity = AccountInfoDouble(ACCOUNT_BALANCE);
+    double potentialLoss = 0;
+    
+    // Подсчитываем потенциальные убытки по всем открытым позициям
+    for(int i = PositionsTotal() - 1; i >= 0; i--)
+    {
+        ulong ticket = PositionGetTicket(i);
+        if(PositionSelectByTicket(ticket))
+        {
+            if(PositionGetString(POSITION_SYMBOL) == _Symbol && 
+               PositionGetInteger(POSITION_MAGIC) == 123456)
+            {
+                double openPrice = PositionGetDouble(POSITION_PRICE_OPEN);
+                double stopLoss = PositionGetDouble(POSITION_SL);
+                double lotSize = PositionGetDouble(POSITION_VOLUME);
+                ENUM_POSITION_TYPE posType = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+                
+                // Если стоп-лосс не установлен, используем максимальный возможный убыток
+                if(stopLoss == 0)
+                {
+                    {
+                        stopLoss = (posType == POSITION_TYPE_BUY) ? 
+                                  openPrice - (StopLoss * _Point) :
+                                  openPrice + (StopLoss * _Point);
+                    }
+                }
+                
+                // Рассчитываем потенциальный убыток
+                double tickValue = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
+                double tickSize = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
+                double pointsToLoss = MathAbs(openPrice - stopLoss) / _Point;
+                double potentialPositionLoss = (pointsToLoss * _Point / tickSize) * tickValue * lotSize;
+                
+                potentialLoss += potentialPositionLoss;
+            }
+        }
+    }
+    
+    // Вычитаем потенциальные убытки из доступного баланса
+    return accountEquity - potentialLoss;
+}
+
+//+------------------------------------------------------------------+
+//| Расчет размера лота на основе риска                               |
+//+------------------------------------------------------------------+
+double CalculateLotSize(double stopLossPoints)
+{
+    datetime currentTime = TimeCurrent();
+    string logHeader = StringFormat("\n=== LOT CALCULATION [%s] ===\n", TimeToString(currentTime));
+    string logMessage = logHeader;
+    
+    // Получаем базовые параметры символа
+    double tickSize = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
+    double tickValue = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
+    double lotStep = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
+    double minLot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
+    double maxLot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
+    
+    logMessage += StringFormat("Symbol: %s\n", _Symbol);
+    logMessage += StringFormat("Tick Size: %.6f\n", tickSize);
+    logMessage += StringFormat("Tick Value: %.6f\n", tickValue);
+    logMessage += StringFormat("Lot Step: %.6f\n", lotStep);
+    logMessage += StringFormat("Min Lot: %.6f\n", minLot);
+    logMessage += StringFormat("Max Lot: %.6f\n", maxLot);
+    
+    // Если используем фиксированный лот
+    if(UseFixedLot) 
+    {
+        double reducedLot = FixedLotSize * (1 - LotReductionPercent/100);
+        reducedLot = NormalizeDouble(reducedLot, 2);
+        
+        logMessage += StringFormat("Using Fixed Lot Size: %.2f (Reduced by %.2f%% to %.2f)\n",
+                                 FixedLotSize, LotReductionPercent, reducedLot);
+        Print(logMessage);
+        return reducedLot;
+    }
+    
+    // Расчет на основе риска
+    double availableEquity = CalculateAvailableBalance();
+    double riskAmount = availableEquity * RiskPercent / 100;
+    
+    logMessage += StringFormat("Available Equity: %.2f\n", availableEquity);
+    logMessage += StringFormat("Risk Percent: %.2f%%\n", RiskPercent);
+    logMessage += StringFormat("Risk Amount: %.2f\n", riskAmount);
+    logMessage += StringFormat("Stop Loss Points: %.2f\n", stopLossPoints);
+    
+    // Расчет стоимости одного пункта
+    double pointCost = tickValue * (stopLossPoints * _Point / tickSize);
+    logMessage += StringFormat("Point Cost: %.6f\n", pointCost);
+    
+    // Предварительный расчет лота
+    double lot = NormalizeDouble(riskAmount / (pointCost * (1/lotStep)), 2);
+    logMessage += StringFormat("Preliminary Lot: %.2f\n", lot);
+    
+    // Применяем уменьшение лота
+    lot = lot * (1 - LotReductionPercent/100);
+    logMessage += StringFormat("After Reduction (%.2f%%): %.2f\n", 
+                             LotReductionPercent, lot);
+    
+    // Проверка на минимальный/максимальный размер лота
+    if(lot < minLot) 
+    {
+        lot = minLot;
+        logMessage += "WARNING: Adjusted to minimum lot size\n";
+    }
+    if(lot > maxLot * 500000) 
+    {
+        lot = maxLot * 500000;
+        logMessage += "WARNING: Adjusted to maximum allowed lot size\n";
+    }
+    
+    // Проверка маржинальных требований
+    double marginRequired = 0.0;
+    if(OrderCalcMargin(ORDER_TYPE_BUY, _Symbol, lot, SymbolInfoDouble(_Symbol, SYMBOL_ASK), marginRequired))
+    {
+        double freeMargin = AccountInfoDouble(ACCOUNT_MARGIN_FREE);
+        logMessage += StringFormat("Margin Required: %.2f\n", marginRequired);
+        logMessage += StringFormat("Free Margin: %.2f\n", freeMargin);
+        
+        if(marginRequired > freeMargin)
+        {
+            double maxPossibleLots = (freeMargin / marginRequired) * lot * 0.95;
+            lot = NormalizeDouble(maxPossibleLots, 2);
+            logMessage += StringFormat("WARNING: Lot adjusted due to margin requirements to %.2f\n", lot);
+        }
+    }
+    
+    // Окончательная нормализация
+    lot = NormalizeDouble(lot, 2);
+    logMessage += StringFormat("Final Lot Size: %.2f\n", lot);
+    
+    Print(logMessage);
+    return lot;
+}
+//+------------------------------------------------------------------+
+//| Открытие позиции                                                   |
+//+------------------------------------------------------------------+
+void OpenPosition(ENUM_ORDER_TYPE orderType)
+{
+    string logMessage = StringFormat("\n=== POSITION OPENING [%s] ===\n", TimeToString(TimeCurrent()));
+    
+    // Получаем информацию о счете
+    double accountBalance = AccountInfoDouble(ACCOUNT_BALANCE);
+    double freeMargin = AccountInfoDouble(ACCOUNT_MARGIN_FREE);
+    
+    logMessage += StringFormat("Account Balance: %.2f\n", accountBalance);
+    logMessage += StringFormat("Free Margin: %.2f\n", freeMargin);
+    
+    // Расчет размера лота
+    double lotSize = CalculateLotSize(StopLoss);
+    
+    logMessage += StringFormat("Calculated Lot Size: %.2f\n", lotSize);
+    
+    // Проверка корректности размера лота
+    if(lotSize <= 0 || lotSize < SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN))
+    {
+        Print(logMessage + "ERROR: Invalid lot size calculated");
+        return;
+    }
+    
+    // Получаем текущие цены
+    double askPrice = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+    double bidPrice = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+    double openPrice = (orderType == ORDER_TYPE_BUY) ? askPrice : bidPrice;
+    
+    logMessage += StringFormat("Ask Price: %.5f\n", askPrice);
+    logMessage += StringFormat("Bid Price: %.5f\n", bidPrice);
+    logMessage += StringFormat("Open Price: %.5f\n", openPrice);
+    
+    // Расчет уровней Stop Loss и Take Profit
+    double stopLoss, takeProfit;
+    
+    if(orderType == ORDER_TYPE_BUY)
+    {
+        stopLoss = openPrice - StopLoss * _Point;
+        takeProfit = UseFixedTP ? openPrice + TakeProfit * _Point 
+                               : openPrice + (StopLoss * 2) * _Point;
+    }
+    else
+    {
+        stopLoss = openPrice + StopLoss * _Point;
+        takeProfit = UseFixedTP ? openPrice - TakeProfit * _Point 
+                               : openPrice - (StopLoss * 2) * _Point;
+    }
+    
+    logMessage += StringFormat("Stop Loss: %.5f\n", stopLoss);
+    logMessage += StringFormat("Take Profit: %.5f\n", takeProfit);
+    
+    // Проверка маржинальных требований
+    double marginRequired = 0.0;
+    if(!OrderCalcMargin(orderType, _Symbol, lotSize, openPrice, marginRequired))
+    {
+        Print(logMessage + "ERROR: Failed to calculate margin requirements");
+        return;
+    }
+    
+    logMessage += StringFormat("Margin Required: %.2f\n", marginRequired);
+    
+    if(marginRequired > freeMargin)
+    {
+        logMessage += StringFormat("ERROR: Insufficient margin. Required: %.2f Available: %.2f\n", 
+                                 marginRequired, freeMargin);
+        Print(logMessage);
+        return;
+    }
+    
+    // Если размер лота превышает максимально допустимый для одной сделки
+    const double MAX_SINGLE_LOT = 1000000000.0;
+    if(lotSize > MAX_SINGLE_LOT)
+    {
+        logMessage += StringFormat("Large lot size detected (%.2f). Splitting into multiple positions.\n", lotSize);
+        Print(logMessage);
+        OpenMultiplePositions(orderType, lotSize, openPrice, stopLoss, takeProfit);
+        return;
+    }
+    
+    // Обновляем значения для трейлинг стопа
+if(TrailingStopCoef <= 0)
+{
+    CurrentTrailingStop = 0;
+    CurrentTrailingStart = 0;
+}
+else
+{
+    // Как размер trailing stop, так и точка его активации зависят от коэффициента
+    CurrentTrailingStop = (int)(StopLoss * TrailingStopCoef);
+    CurrentTrailingStart = (int)(StopLoss * TrailingStopCoef);
+}
+    
+    // Открытие позиции
+    trade.SetDeviationInPoints(5);
+    
+    logMessage += "Attempting to open position...\n";
+    Print(logMessage);
+    
+    if(!trade.PositionOpen(_Symbol, orderType, lotSize, openPrice, stopLoss, takeProfit, "EMA + RSI Expert"))
+    {
+        Print("ERROR opening position: ", GetLastError());
+        return;
+    }
+    
+    if(trade.ResultRetcode() == TRADE_RETCODE_DONE)
+    {
+        initialTradePrice = openPrice;
+        isTrailingOrderPlaced = false;
+        
+        Print("Position opened successfully:",
+              "\nTicket: ", trade.ResultOrder(),
+              "\nLot: ", lotSize,
+              "\nPrice: ", openPrice,
+              "\nSL: ", stopLoss,
+              "\nTP: ", takeProfit,
+              "\nTrailing Stop: ", CurrentTrailingStop,
+              "\nTrailing Start: ", CurrentTrailingStart);
+    }
+}
+
+//+------------------------------------------------------------------+
+//| Обновление новостей                                               |
+//+------------------------------------------------------------------+
+bool UpdateNews()
+{
+    datetime currentTime = TimeCurrent();
+    nextNewsUpdate = currentTime + UpdateHours * 3600;
+    
+    // Получаем путь к общей папке терминала
+    string terminal_data_path = TerminalInfoString(TERMINAL_COMMONDATA_PATH);
+    string mql_files_dir = terminal_data_path + "\\MQL5\\Files\\";
+    
+    // Определяем, какой файл новостей нам нужен
+    MqlDateTime dt;
+    TimeToStruct(currentTime, dt);
+    string requiredFile = StringFormat("news_%04d%02d.txt", dt.year, dt.mon);
+    string fullPath = mql_files_dir + requiredFile;
+    
+    // Если текущий файл уже загружен, не загружаем его снова
+    if(requiredFile == currentNewsFile)
+        return true;
+        
+    // Очищаем текущий массив новостей
+    ArrayFree(news);
+    newsCount = 0;
+    
+    // Проверяем наличие файла
+    if(!FileIsExist(requiredFile, FILE_COMMON))
+    {
+        string warningMessage = StringFormat(
+            "\n=== NEWS FILE NOT FOUND ===\n" +
+            "Date (UTC): %s\n" +
+            "User: %s\n" +
+            "Missing file: %s\n" +
+            "Expected location: %s\n" +
+            "WARNING: Expert will continue running without news filter!\n" +
+            "=========================",
+            TimeToString(TimeGMT(), TIME_DATE|TIME_SECONDS),
+            AccountInfoString(ACCOUNT_NAME),
+            requiredFile,
+            fullPath
+        );
+        Print(warningMessage);
+        return true; // Возвращаем true, чтобы советник продолжил работу
+    }
+    
+    // Пытаемся открыть файл
+    int fileHandle = FileOpen(requiredFile, FILE_READ|FILE_TXT|FILE_ANSI|FILE_COMMON);
+    if(fileHandle == INVALID_HANDLE)
+    {
+        string warningMessage = StringFormat(
+            "\n=== ERROR OPENING NEWS FILE ===\n" +
+            "Date (UTC): %s\n" +
+            "User: %s\n" +
+            "File: %s\n" +
+            "Error code: %d\n" +
+            "WARNING: Expert will continue running without news filter!\n" +
+            "==============================",
+            TimeToString(TimeGMT(), TIME_DATE|TIME_SECONDS),
+            AccountInfoString(ACCOUNT_NAME),
+            requiredFile,
+            GetLastError()
+        );
+        Print(warningMessage);
+        return true; // Возвращаем true, чтобы советник продолжил работу
+    }
+    
+    // Читаем файл построчно
+    SNewsEvent testNews;
+    while(!FileIsEnding(fileHandle))
+    {
+        string line = FileReadString(fileHandle);
+        
+        // Пропускаем пустые строки
+        if(StringLen(line) == 0)
+            continue;
+            
+        // Если это строка с датой
+        if(StringFind(line, "testNews.time") >= 0)
+        {
+            // Извлекаем дату
+            int pos1 = StringFind(line, "\"") + 1;
+            int pos2 = StringFind(line, "\"", pos1);
+            string dateTimeStr = StringSubstr(line, pos1, pos2-pos1);
+            testNews.time = StringToTime(dateTimeStr);
+            
+            // Читаем следующие строки
+            line = FileReadString(fileHandle); // currency
+            pos1 = StringFind(line, "\"") + 1;
+            pos2 = StringFind(line, "\"", pos1);
+            testNews.currency = StringSubstr(line, pos1, pos2-pos1);
+            
+            line = FileReadString(fileHandle); // title
+            pos1 = StringFind(line, "\"") + 1;
+            pos2 = StringFind(line, "\"", pos1);
+            testNews.title = StringSubstr(line, pos1, pos2-pos1);
+            
+            line = FileReadString(fileHandle); // impact
+            pos1 = StringFind(line, "\"") + 1;
+            pos2 = StringFind(line, "\"", pos1);
+            testNews.impact = StringSubstr(line, pos1, pos2-pos1);
+            
+            // Пропускаем строку AddNewsEvent
+            line = FileReadString(fileHandle);
+            
+            // Добавляем новость в массив
+            AddNewsEvent(testNews);
+        }
+    }
+    
+    FileClose(fileHandle);
+    
+    if(newsCount == 0)
+    {
+        string warningMessage = StringFormat(
+            "\n=== NO NEWS EVENTS FOUND ===\n" +
+            "Date (UTC): %s\n" +
+            "User: %s\n" +
+            "File: %s\n" +
+            "WARNING: Expert will continue running without news filter!\n" +
+            "==========================",
+            TimeToString(TimeGMT(), TIME_DATE|TIME_SECONDS),
+            AccountInfoString(ACCOUNT_NAME),
+            requiredFile
+        );
+        Print(warningMessage);
+        return true; // Возвращаем true, чтобы советник продолжил работу
+    }
+    
+    currentNewsFile = requiredFile;
+    Print("Successfully loaded ", newsCount, " news events from file: ", requiredFile);
+    return true;
+}
+
+//+------------------------------------------------------------------+
+//| Добавление новости в массив                                       |
+//+------------------------------------------------------------------+
+void AddNewsEvent(SNewsEvent &newEvent)
+{
+    newsCount++;
+    ArrayResize(news, newsCount);
+    news[newsCount-1] = newEvent;
+}
+
+//+------------------------------------------------------------------+
+//| Проверка новостного времени                                       |
+//+------------------------------------------------------------------+
+bool IsNewsTime()
+{
+    if(ArraySize(news) == 0)
+        return false;
+        
+    datetime currentTime = TimeCurrent();
+    
+    for(int i = 0; i < ArraySize(news); i++)
+    {
+        if(news[i].time > currentTime - 24*60*60) // проверяем новости за последние 24 часа
+        {
+            int minutesDiff = (int)(news[i].time - currentTime) / 60;
+            bool isNewsApproaching = false;
+            
+            // Проверка для USD
+            if(StringFind(_Symbol, "USD") >= 0 && UseUSDFilter)
+            {
+                if(!CheckNewsImpact(news[i].impact, "USD"))
+                    continue;
+                    
+                if(MathAbs(minutesDiff) <= USD_MinutesBefore || 
+                   (minutesDiff < 0 && MathAbs(minutesDiff) <= USD_MinutesAfter))
+                {
+                    isNewsApproaching = true;
+                }
+            }
+            
+            // Проверка для USD
+            if(StringFind(_Symbol, "GBP") >= 0 && UseGBPFilter)
+            {
+                if(!CheckNewsImpact(news[i].impact, "GBP"))
+                    continue;
+                    
+                if(MathAbs(minutesDiff) <= GBP_MinutesBefore || 
+                   (minutesDiff < 0 && MathAbs(minutesDiff) <= GBP_MinutesAfter))
+                {
+                    isNewsApproaching = true;
+                }
+            }
+            
+            // Проверка для EUR
+            if(StringFind(_Symbol, "EUR") >= 0 && UseEURFilter)
+            {
+                if(!CheckNewsImpact(news[i].impact, "EUR"))
+                    continue;
+                    
+                if(MathAbs(minutesDiff) <= EUR_MinutesBefore || 
+                   (minutesDiff < 0 && MathAbs(minutesDiff) <= EUR_MinutesAfter))
+                {
+                    isNewsApproaching = true;
+                }
+            }
+            
+            // Проверка для JPY
+            if(StringFind(_Symbol, "JPY") >= 0 && UseJPYFilter)
+            {
+                if(!CheckNewsImpact(news[i].impact, "JPY"))
+                    continue;
+                    
+                if(MathAbs(minutesDiff) <= JPY_MinutesBefore || 
+                   (minutesDiff < 0 && MathAbs(minutesDiff) <= JPY_MinutesAfter))
+                {
+                    isNewsApproaching = true;
+                }
+            }
+            
+            // Проверка для CHF
+            if(StringFind(_Symbol, "CHF") >= 0 && UseCHFFilter)
+            {
+                if(!CheckNewsImpact(news[i].impact, "CHF"))
+                    continue;
+                    
+                if(MathAbs(minutesDiff) <= CHF_MinutesBefore || 
+                   (minutesDiff < 0 && MathAbs(minutesDiff) <= CHF_MinutesAfter))
+                {
+                    isNewsApproaching = true;
+                }
+            }
+            
+            // Проверка для AUD
+            if(StringFind(_Symbol, "AUD") >= 0 && UseAUDFilter)
+            {
+                if(!CheckNewsImpact(news[i].impact, "AUD"))
+                    continue;
+                    
+                if(MathAbs(minutesDiff) <= AUD_MinutesBefore || 
+                   (minutesDiff < 0 && MathAbs(minutesDiff) <= AUD_MinutesAfter))
+                {
+                    isNewsApproaching = true;
+                }
+            }
+            
+            // Проверка для CAD
+            if(StringFind(_Symbol, "CAD") >= 0 && UseCADFilter)
+            {
+                if(!CheckNewsImpact(news[i].impact, "CAD"))
+                    continue;
+                    
+                if(MathAbs(minutesDiff) <= CAD_MinutesBefore || 
+                   (minutesDiff < 0 && MathAbs(minutesDiff) <= CAD_MinutesAfter))
+                {
+                    isNewsApproaching = true;
+                }
+            }
+            
+            // Проверка для NZD
+            if(StringFind(_Symbol, "NZD") >= 0 && UseNZDFilter)
+            {
+                if(!CheckNewsImpact(news[i].impact, "NZD"))
+                    continue;
+                    
+                if(MathAbs(minutesDiff) <= NZD_MinutesBefore || 
+                   (minutesDiff < 0 && MathAbs(minutesDiff) <= NZD_MinutesAfter))
+                {
+                    isNewsApproaching = true;
+                }
+            }
+            
+            // Проверка для CNY
+            if(StringFind(_Symbol, "CNY") >= 0 && UseCNYFilter)
+            {
+                if(!CheckNewsImpact(news[i].impact, "CNY"))
+                    continue;
+                    
+                if(MathAbs(minutesDiff) <= CNY_MinutesBefore || 
+                   (minutesDiff < 0 && MathAbs(minutesDiff) <= CNY_MinutesAfter))
+                {
+                    isNewsApproaching = true;
+                }
+            }
+
+            // Если обнаружена приближающаяся новость, проверяем открытые позиции
+            if(isNewsApproaching)
+            {
+                for(int pos = PositionsTotal() - 1; pos >= 0; pos--)
+                {
+                    ulong ticket = PositionGetTicket(pos);
+                    if(PositionSelectByTicket(ticket))
+                    {
+                        if(PositionGetString(POSITION_SYMBOL) == _Symbol && 
+                           PositionGetInteger(POSITION_MAGIC) == 123456)
+                        {
+                            double positionProfit = PositionGetDouble(POSITION_PROFIT);
+                            double openPrice = PositionGetDouble(POSITION_PRICE_OPEN);
+                            double currentPrice = PositionGetDouble(POSITION_PRICE_CURRENT);
+                            double currentSL = PositionGetDouble(POSITION_SL);
+                            ENUM_POSITION_TYPE posType = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+                            
+                            // Проверяем, находится ли позиция в плюсе
+                            bool isInProfit = false;
+                            if(posType == POSITION_TYPE_BUY)
+                                isInProfit = (currentPrice > openPrice);
+                            else
+                                isInProfit = (currentPrice < openPrice);
+                            
+                            // Проверяем, активен ли trailing stop
+                            bool isTrailingActive = false;
+                            if(posType == POSITION_TYPE_BUY)
+                                isTrailingActive = (currentPrice - openPrice) > CurrentTrailingStart * _Point;
+                            else
+                                isTrailingActive = (openPrice - currentPrice) > CurrentTrailingStart * _Point;
+                            
+                            // Если в плюсе и trailing stop не активен
+if(isInProfit && !isTrailingActive && UseNewsProtectionPlus)
+{
+    double newSL = posType == POSITION_TYPE_BUY ? 
+                 openPrice + NewsProtectionPlusPoints * _Point :
+                 openPrice - NewsProtectionPlusPoints * _Point;
+                 
+    if((posType == POSITION_TYPE_BUY && (newSL > currentSL || currentSL == 0)) ||
+       (posType == POSITION_TYPE_SELL && (newSL < currentSL || currentSL == 0)))
+    {
+        trade.PositionModify(ticket, newSL, PositionGetDouble(POSITION_TP));
+        Print("News protection: Modified SL to breakeven +", NewsProtectionPlusPoints, " points");
+    }
+}
+// Если в минусе
+else if(!isInProfit && UseNewsProtectionPlus)
+{
+    double newTP = openPrice + (posType == POSITION_TYPE_BUY ? 
+                 NewsProtectionPlusPoints * _Point : 
+                 -NewsProtectionPlusPoints * _Point);
+                 
+    trade.PositionModify(ticket, PositionGetDouble(POSITION_SL), newTP);
+    Print("News protection: Modified TP to breakeven +", NewsProtectionPlusPoints, " points");
+}
+                        }
+                    }
+                }
+                return true;
+            }
+        }
+    }
+    
+    return false;
+}
+
+//+------------------------------------------------------------------+
+//| Проверка важности новости                                         |
+//+------------------------------------------------------------------+
+bool CheckNewsImpact(string impact, string currency)
+{
+    if(currency == "USD")
+    {
+        if(impact == "Non-Economic" && !USD_NonEconomic) return false;
+        if(impact == "Low" && !USD_Low) return false;
+        if(impact == "Medium" && !USD_Medium) return false;
+        if(impact == "High" && !USD_High) return false;
+    }
+    else if(currency == "EUR")
+    {
+        if(impact == "Non-Economic" && !EUR_NonEconomic) return false;
+        if(impact == "Low" && !EUR_Low) return false;
+        if(impact == "Medium" && !EUR_Medium) return false;
+        if(impact == "High" && !EUR_High) return false;
+    }
+    else if(currency == "GBP")
+    {
+        if(impact == "Non-Economic" && !GBP_NonEconomic) return false;
+        if(impact == "Low" && !GBP_Low) return false;
+        if(impact == "Medium" && !GBP_Medium) return false;
+        if(impact == "High" && !GBP_High) return false;
+    }
+    else if(currency == "JPY")
+    {
+        if(impact == "Non-Economic" && !JPY_NonEconomic) return false;
+        if(impact == "Low" && !JPY_Low) return false;
+        if(impact == "Medium" && !JPY_Medium) return false;
+        if(impact == "High" && !JPY_High) return false;
+    }
+    else if(currency == "CHF")
+    {
+        if(impact == "Non-Economic" && !CHF_NonEconomic) return false;
+        if(impact == "Low" && !CHF_Low) return false;
+        if(impact == "Medium" && !CHF_Medium) return false;
+        if(impact == "High" && !CHF_High) return false;
+    }
+    else if(currency == "AUD")
+    {
+        if(impact == "Non-Economic" && !AUD_NonEconomic) return false;
+        if(impact == "Low" && !AUD_Low) return false;
+        if(impact == "Medium" && !AUD_Medium) return false;
+        if(impact == "High" && !AUD_High) return false;
+    }
+    else if(currency == "CAD")
+    {
+        if(impact == "Non-Economic" && !CAD_NonEconomic) return false;
+        if(impact == "Low" && !CAD_Low) return false;
+        if(impact == "Medium" && !CAD_Medium) return false;
+        if(impact == "High" && !CAD_High) return false;
+    }
+    else if(currency == "NZD")
+    {
+        if(impact == "Non-Economic" && !NZD_NonEconomic) return false;
+        if(impact == "Low" && !NZD_Low) return false;
+        if(impact == "Medium" && !NZD_Medium) return false;
+        if(impact == "High" && !NZD_High) return false;
+    }
+    else if(currency == "CNY")
+    {
+        if(impact == "Non-Economic" && !CNY_NonEconomic) return false;
+        if(impact == "Low" && !CNY_Low) return false;
+        if(impact == "Medium" && !CNY_Medium) return false;
+        if(impact == "High" && !CNY_High) return false;
+    }
+    
+    return true;
+}
+
+//+------------------------------------------------------------------+
+//| Проверка наличия новостей на текущий день                         |
+//+------------------------------------------------------------------+
+bool HasNewsForCurrentDay()
+{
+    datetime currentTime = TimeCurrent();
+    MqlDateTime current;
+    TimeToStruct(currentTime, current);
+    
+    // Проверяем, включена ли проверка новостей для текущего дня недели
+    bool checkNewsToday = false;
+    switch(current.day_of_week)
+    {
+        case MONDAY:
+            checkNewsToday = Monday_CheckNews;
+            break;
+        case TUESDAY:
+            checkNewsToday = Tuesday_CheckNews;
+            break;
+        case WEDNESDAY:
+            checkNewsToday = Wednesday_CheckNews;
+            break;
+        case THURSDAY:
+            checkNewsToday = Thursday_CheckNews;
+            break;
+        case FRIDAY:
+            checkNewsToday = Friday_CheckNews;
+            break;
+        default:
+            Print("Weekend - trading disabled");
+            return false;
+    }
+    
+    // Если проверка новостей для текущего дня отключена, разрешаем торговлю
+    if(!checkNewsToday)
+    {
+        return true;
+    }
+    
+    // Получаем начало и конец текущего дня
+    datetime dayStart = StringToTime(StringFormat("%04d.%02d.%02d 00:00:00", 
+        current.year, current.mon, current.day));
+    datetime dayEnd = StringToTime(StringFormat("%04d.%02d.%02d 23:59:59", 
+        current.year, current.mon, current.day));
+    
+    bool hasImportantNews = false;
+    string newsFoundForCurrencies = "";  // Строка для хранения валют, по которым найдены новости
+    int currencyCount = 0;              // Счетчик валют с новостями
+    
+    // Проверяем каждую новость в массиве
+    for(int i = 0; i < ArraySize(news); i++)
+    {
+        // Если новость попадает в текущий день
+        if(news[i].time >= dayStart && news[i].time <= dayEnd)
+        {
+            // Проверяем, включен ли фильтр для валюты новости
+            bool isNewsImportant = false;
+            
+            if(news[i].currency == "AUD" && FilterAUD && StringFind(newsFoundForCurrencies, "AUD") < 0) 
+            {
+                isNewsImportant = true;
+                newsFoundForCurrencies += "AUD,";
+                currencyCount++;
+            }
+            else if(news[i].currency == "CAD" && FilterCAD && StringFind(newsFoundForCurrencies, "CAD") < 0)
+            {
+                isNewsImportant = true;
+                newsFoundForCurrencies += "CAD,";
+                currencyCount++;
+            }
+            else if(news[i].currency == "CHF" && FilterCHF && StringFind(newsFoundForCurrencies, "CHF") < 0)
+            {
+                isNewsImportant = true;
+                newsFoundForCurrencies += "CHF,";
+                currencyCount++;
+            }
+            else if(news[i].currency == "CNY" && FilterCNY && StringFind(newsFoundForCurrencies, "CNY") < 0)
+            {
+                isNewsImportant = true;
+                newsFoundForCurrencies += "CNY,";
+                currencyCount++;
+            }
+            else if(news[i].currency == "EUR" && FilterEUR && StringFind(newsFoundForCurrencies, "EUR") < 0)
+            {
+                isNewsImportant = true;
+                newsFoundForCurrencies += "EUR,";
+                currencyCount++;
+            }
+            else if(news[i].currency == "GBP" && FilterGBP && StringFind(newsFoundForCurrencies, "GBP") < 0)
+            {
+                isNewsImportant = true;
+                newsFoundForCurrencies += "GBP,";
+                currencyCount++;
+            }
+            else if(news[i].currency == "JPY" && FilterJPY && StringFind(newsFoundForCurrencies, "JPY") < 0)
+            {
+                isNewsImportant = true;
+                newsFoundForCurrencies += "JPY,";
+                currencyCount++;
+            }
+            else if(news[i].currency == "NZD" && FilterNZD && StringFind(newsFoundForCurrencies, "NZD") < 0)
+            {
+                isNewsImportant = true;
+                newsFoundForCurrencies += "NZD,";
+                currencyCount++;
+            }
+            else if(news[i].currency == "USD" && FilterUSD && StringFind(newsFoundForCurrencies, "USD") < 0)
+            {
+                isNewsImportant = true;
+                newsFoundForCurrencies += "USD,";
+                currencyCount++;
+            }
+            
+            if(isNewsImportant)
+            {
+                hasImportantNews = true;
+                Print("Important news found for ", news[i].currency, " on ", 
+                      TimeToString(news[i].time, TIME_DATE), ": ", news[i].title);
+            }
+        }
+    }
+    
+    // Проверяем результаты
+    if(hasImportantNews)
+    {
+        // Если включена проверка на одну валюту и новости только по одной валюте
+        if(Check_Single_Currency_News && currencyCount == 1)
+        {
+            Print("Only single currency news found (", newsFoundForCurrencies, ") for day (", 
+                  TimeToString(currentTime, TIME_DATE), "). Trading disabled.");
+            return false;
+        }
+        
+        Print("Multiple currency news found (", newsFoundForCurrencies, ") for day (", 
+              TimeToString(currentTime, TIME_DATE), "). Trading enabled.");
+        return true;
+    }
+    
+    Print("No important news found for current day (", 
+          TimeToString(currentTime, TIME_DATE), 
+          "). Trading disabled.");
+    return false;
+}
+
+//+------------------------------------------------------------------+
+//| Проверка торгового времени                                        |
+//+------------------------------------------------------------------+
+bool IsTradeTime()
+{
+    if(IsMidDayBreak())
+        return false;
+        
+    MqlDateTime dt;
+    TimeToStruct(TimeCurrent(), dt);
+    
+    ENUM_TRADE_HOURS startHour, endHour;
+    bool isDayEnabled;
+    
+    switch(dt.day_of_week)
+    {
+        case MONDAY:
+            isDayEnabled = Monday_Enabled;
+            startHour = Monday_StartHour;
+            endHour = Monday_EndHour;
+            break;
+        case TUESDAY:
+            isDayEnabled = Tuesday_Enabled;
+            startHour = Tuesday_StartHour;
+            endHour = Tuesday_EndHour;
+            break;
+        case WEDNESDAY:
+            isDayEnabled = Wednesday_Enabled;
+            startHour = Wednesday_StartHour;
+            endHour = Wednesday_EndHour;
+            break;
+        case THURSDAY:
+            isDayEnabled = Thursday_Enabled;
+            startHour = Thursday_StartHour;
+            endHour = Thursday_EndHour;
+            break;
+        case FRIDAY:
+            isDayEnabled = Friday_Enabled;
+            startHour = Friday_StartHour;
+            endHour = Friday_EndHour;
+            break;
+        default:
+            return false;
+    }
+    
+    if(!isDayEnabled)
+        return false;
+        
+    // Преобразуем текущее время в часы
+    int currentHour = dt.hour;
+    
+    // Проверяем, находится ли текущий час в диапазоне торговых часов
+    if(endHour >= startHour)
+    {
+        return (currentHour >= startHour && currentHour < endHour);
+    }
+    else // Если конец торговли переходит на следующий день
+    {
+        return (currentHour >= startHour || currentHour < endHour);
+    }
+}
+
+//+------------------------------------------------------------------+
+//| Обновление trailing stop                                          |
+//+------------------------------------------------------------------+
+void UpdateTrailingStop()
+{
+    for(int i = PositionsTotal() - 1; i >= 0; i--)
+    {
+        ulong ticket = PositionGetTicket(i);
+        if(PositionSelectByTicket(ticket))
+        {
+            if(PositionGetString(POSITION_SYMBOL) == _Symbol && 
+               PositionGetInteger(POSITION_MAGIC) == 123456)
+            {
+                double openPrice = PositionGetDouble(POSITION_PRICE_OPEN);
+                double currentPrice = PositionGetDouble(POSITION_PRICE_CURRENT);
+                double currentSL = PositionGetDouble(POSITION_SL);
+                ENUM_POSITION_TYPE posType = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+                
+                // Проверяем, достигнута ли точка активации trailing stop
+                bool shouldTrail = false;
+                if(posType == POSITION_TYPE_BUY)
+                {
+                    shouldTrail = (currentPrice - openPrice) >= CurrentTrailingStart * _Point;
+                    if(shouldTrail)
+                    {
+                        double newSL = currentPrice - CurrentTrailingStop * _Point;
+                        if(newSL > currentSL)
+                        {
+                            trade.PositionModify(ticket, newSL, PositionGetDouble(POSITION_TP));
+                            Print("Trailing Stop updated for Buy position. New SL: ", newSL);
+                        }
+                    }
+                }
+                else // POSITION_TYPE_SELL
+                {
+                    shouldTrail = (openPrice - currentPrice) >= CurrentTrailingStart * _Point;
+                    if(shouldTrail)
+                    {
+                        double newSL = currentPrice + CurrentTrailingStop * _Point;
+                        if(newSL < currentSL || currentSL == 0)
+                        {
+                            trade.PositionModify(ticket, newSL, PositionGetDouble(POSITION_TP));
+                            Print("Trailing Stop updated for Sell position. New SL: ", newSL);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+//+------------------------------------------------------------------+
+//| Проверка и обновление trailing order                              |
+//+------------------------------------------------------------------+
+void CheckTrailingOrder()
+{
+    static datetime lastTrailingOrderTime = 0;
+    datetime currentTime = TimeCurrent();
+    
+    // Обновляем trailing order не чаще чем раз в минуту
+    if(currentTime - lastTrailingOrderTime < 60)
+        return;
+        
+    lastTrailingOrderTime = currentTime;
+    
+    if(!isTrailingOrderPlaced)
+    {
+        // Если нет открытых позиций, не размещаем trailing order
+        if(PositionsTotal() == 0)
+            return;
+            
+        for(int i = PositionsTotal() - 1; i >= 0; i--)
+        {
+            ulong ticket = PositionGetTicket(i);
+            if(PositionSelectByTicket(ticket))
+            {
+                if(PositionGetString(POSITION_SYMBOL) == _Symbol && 
+                   PositionGetInteger(POSITION_MAGIC) == 123456)
+                {
+                    double openPrice = PositionGetDouble(POSITION_PRICE_OPEN);
+                    double currentPrice = PositionGetDouble(POSITION_PRICE_CURRENT);
+                    ENUM_POSITION_TYPE posType = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+                    double lotSize = PositionGetDouble(POSITION_VOLUME);
+                    
+                    // Проверяем условия для размещения trailing order
+                    if(posType == POSITION_TYPE_BUY && 
+                       currentPrice - openPrice >= TrailingOrderDistance * _Point)
+                    {
+                        double sellPrice = currentPrice - TrailingOrderDistance * _Point;
+                        trade.SellStop(lotSize, sellPrice, _Symbol, 0, 0, 0, 0, "Trailing Order");
+                        isTrailingOrderPlaced = true;
+                        trailingOrderLot = lotSize;
+                        Print("Placed trailing sell stop order at ", sellPrice);
+                    }
+                    else if(posType == POSITION_TYPE_SELL && 
+                            openPrice - currentPrice >= TrailingOrderDistance * _Point)
+                    {
+                        double buyPrice = currentPrice + TrailingOrderDistance * _Point;
+                        trade.BuyStop(lotSize, buyPrice, _Symbol, 0, 0, 0, 0, "Trailing Order");
+                        isTrailingOrderPlaced = true;
+                        trailingOrderLot = lotSize;
+                        Print("Placed trailing buy stop order at ", buyPrice);
+                    }
+                }
+            }
+        }
+    }
+}
+
+//+------------------------------------------------------------------+
+//| Обновление отображения информации о новостях                      |
+//+------------------------------------------------------------------+
+void UpdateNewsDisplay()
+{
+    // Удаляем старые метки
+    DeleteNewsLabels();
+    
+    if(ArraySize(news) == 0)
+        return;
+        
+    datetime currentTime = TimeCurrent();
+    int displayedNews = 0;
+    
+    for(int i = 0; i < ArraySize(news); i++)
+    {
+        if(news[i].time < currentTime - 24*60*60) // пропускаем старые новости
+            continue;
+            
+        // Создаем метку для новости
+        string labelName = newsLabelBase + IntegerToString(displayedNews);
+        string labelText = TimeToString(news[i].time, TIME_DATE|TIME_MINUTES) + 
+                          " " + news[i].currency + " " + 
+                          news[i].title + " (" + news[i].impact + ")";
+                          
+        ObjectCreate(0, labelName, OBJ_LABEL, 0, 0, 0);
+        ObjectSetString(0, labelName, OBJPROP_TEXT, labelText);
+        ObjectSetInteger(0, labelName, OBJPROP_COLOR, NewsTextColor);
+        ObjectSetInteger(0, labelName, OBJPROP_CORNER, CORNER_RIGHT_UPPER);
+        ObjectSetInteger(0, labelName, OBJPROP_XDISTANCE, 10);
+        ObjectSetInteger(0, labelName, OBJPROP_YDISTANCE, 20 + displayedNews * 20);
+        
+        displayedNews++;
+        if(displayedNews >= 5) // показываем максимум 5 ближайших новостей
+            break;
+    }
+    
+    newsLabelsCount = displayedNews;
+}
+
+//+------------------------------------------------------------------+
+//| Удаление информационных меток о новостях                          |
+//+------------------------------------------------------------------+
+void DeleteNewsLabels()
+{
+    for(int i = 0; i < newsLabelsCount; i++)
+    {
+        string labelName = newsLabelBase + IntegerToString(i);
+        ObjectDelete(0, labelName);
+    }
+    newsLabelsCount = 0;
+}
+
+//+------------------------------------------------------------------+
+//| Проверка торговых параметров                                      |
+//+------------------------------------------------------------------+
+bool CheckTradeParameters()
+{
+    // Проверка времени перерыва
+    if(UseMidDayBreak)
+    {
+        if(!CheckTimeString(MidDayBreakStart) || !CheckTimeString(MidDayBreakEnd))
+        {
+            Print("Invalid mid-day break time format");
+            return false;
+        }
+    }
+        
+    // Проверка параметров лота
+    if(UseFixedLot && (FixedLotSize <= 0 || 
+       FixedLotSize < SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN) ||
+       FixedLotSize > SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX)))
+    {
+        Print("Invalid fixed lot size");
+        return false;
+    }
+    
+    if(LotReductionPercent < 0 || LotReductionPercent > 100)
+    {
+        Print("Invalid lot reduction percentage. Must be between 0 and 100");
+        return false;
+    }
+    
+    return true;
+}
+
+//+------------------------------------------------------------------+
+//| Открытие нескольких позиций с разделением большого лота           |
+//+------------------------------------------------------------------+
+void OpenMultiplePositions(ENUM_ORDER_TYPE orderType, double totalLotSize, double price, double sl, double tp)
+{
+    const double MAX_LOT_SIZE = 1000000.0;  // Максимальный размер одного лота
+    
+    // Добавляем проверку маржи перед открытием позиций
+    double marginRequired = 0.0;
+    if(!OrderCalcMargin(orderType, _Symbol, totalLotSize, price, marginRequired))
+    {
+        Print("Failed to calculate margin requirements. Error: ", GetLastError());
+        return;
+    }
+    
+    double freeMargin = AccountInfoDouble(ACCOUNT_MARGIN_FREE);
+    
+    Print("=== MARGIN CHECK ===");
+    Print("Total lots requested: ", totalLotSize);
+    Print("Margin required: ", marginRequired);
+    Print("Free margin: ", freeMargin);
+    
+    // Если требуемая маржа больше свободной, корректируем размер позиции
+    if(marginRequired > freeMargin)
+    {
+        double maxPossibleLots = (freeMargin / marginRequired) * totalLotSize * 0.95; // 95% от максимально возможного
+        maxPossibleLots = NormalizeDouble(maxPossibleLots, 2);
+        
+        Print("WARNING: Insufficient margin for requested position size");
+        Print("Adjusting total lot size from ", totalLotSize, " to ", maxPossibleLots);
+        
+        totalLotSize = maxPossibleLots;
+    }
+    
+    // Проверяем минимальные требования
+    double minLot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
+    if(totalLotSize < minLot)
+    {
+        Print("Calculated lot size too small. Minimum allowed: ", minLot);
+        return;
+    }
+    
+    // Открываем первую позицию
+    double firstLot = MathMin(MAX_LOT_SIZE, totalLotSize);
+    
+    Print("=== OPENING FIRST POSITION ===");
+    Print("Lot size: ", firstLot);
+    Print("Price: ", price);
+    Print("SL: ", sl);
+    Print("TP: ", tp);
+    
+    if(!trade.PositionOpen(_Symbol, orderType, firstLot, price, sl, tp, "EMA + RSI Expert Main"))
+    {
+        Print("Failed to open initial position. Error: ", GetLastError());
+        return;
+    }
+    
+    // Если остался объем для дополнительных позиций
+    if(totalLotSize > MAX_LOT_SIZE)
+    {
+        double remainingLots = totalLotSize - MAX_LOT_SIZE;
+        int additionalOrders = (int)MathCeil(remainingLots / MAX_LOT_SIZE);
+        
+        Print("=== OPENING ADDITIONAL POSITIONS ===");
+        Print("Remaining lots: ", remainingLots);
+        Print("Additional orders needed: ", additionalOrders);
+        
+        for(int i = 0; i < additionalOrders; i++)
+        {
+            // Проверяем маржу перед каждым новым ордером
+            freeMargin = AccountInfoDouble(ACCOUNT_MARGIN_FREE);
+            double currentLot = (i == additionalOrders - 1) ? 
+                              NormalizeDouble(remainingLots, 2) : MAX_LOT_SIZE;
+            
+            if(!OrderCalcMargin(orderType, _Symbol, currentLot, price, marginRequired))
+                continue;
+                
+            if(marginRequired > freeMargin)
+            {
+                Print("WARNING: Insufficient margin for additional order. Stopping.");
+                break;
+            }
+            
+            if(currentLot > MAX_LOT_SIZE)
+                currentLot = MAX_LOT_SIZE;
+                
+            remainingLots -= currentLot;
+            
+            // Увеличиваем отступ для каждого следующего ордера
+            double orderPrice;
+            if(orderType == ORDER_TYPE_BUY)
+            {
+                orderPrice = SymbolInfoDouble(_Symbol, SYMBOL_ASK) + ((5 + i) * _Point);
+                if(!trade.BuyStop(currentLot, orderPrice, _Symbol, sl, tp, 
+                   ORDER_TIME_GTC, 0, "EMA + RSI Expert " + IntegerToString(i+2)))
+                {
+                    Print("Failed to place buy stop order ", i+2, ". Error: ", GetLastError());
+                    continue;
+                }
+            }
+            else
+            {
+                orderPrice = SymbolInfoDouble(_Symbol, SYMBOL_BID) - ((5 + i) * _Point);
+                if(!trade.SellStop(currentLot, orderPrice, _Symbol, sl, tp, 
+                   ORDER_TIME_GTC, 0, "EMA + RSI Expert " + IntegerToString(i+2)))
+                {
+                    Print("Failed to place sell stop order ", i+2, ". Error: ", GetLastError());
+                    continue;
+                }
+            }
+            
+            Sleep(500); // Увеличиваем задержку между ордерами
+        }
+    }
+}
+
+//+------------------------------------------------------------------+
+//| Проверка корректности формата времени                             |
+//+------------------------------------------------------------------+
+bool CheckTimeString(string timeStr)
+{
+    string parts[];
+    if(StringSplit(timeStr, ':', parts) != 2)
+        return false;
+        
+    int hours = (int)StringToInteger(parts[0]);
+    int minutes = (int)StringToInteger(parts[1]);
+    
+    return (hours >= 0 && hours < 24 && minutes >= 0 && minutes < 60);
+}
+//+------------------------------------------------------------------+
