@@ -605,28 +605,17 @@ int OnInit()
 //+------------------------------------------------------------------+
 double CalculateVFI(int index)
 {
-    static double vfi_buffer[];
-    static double vfi_ema_buffer[];
-    static bool initialized = false;
-    
-    if(!initialized)
-    {
-        ArraySetAsSeries(vfi_buffer, true);
-        ArraySetAsSeries(vfi_ema_buffer, true);
-        ArrayResize(vfi_buffer, VFI_Length + 50);
-        ArrayResize(vfi_ema_buffer, VFI_Length + 50);
-        initialized = true;
-    }
-    
     // Get required data
     MqlRates rates[];
     ArraySetAsSeries(rates, true);
     
-    int copied = CopyRates(_Symbol, PERIOD_CURRENT, index, VFI_Length + 10, rates);
-    if(copied < VFI_Length + 5) return 0.0;
+    int copied = CopyRates(_Symbol, PERIOD_CURRENT, index, VFI_Length + 5, rates);
+    if(copied < VFI_Length + 2) return 0.0;
     
-    // Calculate VFI for current index
-    for(int i = 0; i < copied - 1; i++)
+    double vfi_sum = 0.0;
+    
+    // Calculate VFI values for the period
+    for(int i = 0; i < VFI_Length && i < copied - 1; i++)
     {
         double typical_price = (rates[i].high + rates[i].low + rates[i].close) / 3.0;
         double prev_typical_price = (rates[i+1].high + rates[i+1].low + rates[i+1].close) / 3.0;
@@ -637,46 +626,19 @@ double CalculateVFI(int index)
         // Ensure minimum volume
         if(volume <= 0) volume = 1;
         
-        // Calculate volume-weighted price change
+        // Calculate volume-weighted price change (LazyBear VFI formula)
         double vcp = 0.0;
         if(MathAbs(price_change) > VFI_Coef * _Point)
         {
-            vcp = (price_change / _Point) * MathMin(volume, VFI_VCoef * volume);
+            double volume_factor = MathMin(volume, VFI_VCoef * volume);
+            vcp = (price_change / _Point) * volume_factor;
         }
         
-        // Calculate VFI
-        double vfi_sum = 0.0;
-        int count = 0;
-        for(int j = i; j < MathMin(i + VFI_Length, copied - 1); j++)
-        {
-            double tp_j = (rates[j].high + rates[j].low + rates[j].close) / 3.0;
-            double prev_tp_j = (rates[j+1].high + rates[j+1].low + rates[j+1].close) / 3.0;
-            double pc_j = tp_j - prev_tp_j;
-            double vol_j = VFI_UseRealVolume ? rates[j].real_volume : rates[j].tick_volume;
-            if(vol_j <= 0) vol_j = 1;
-            
-            if(MathAbs(pc_j) > VFI_Coef * _Point)
-            {
-                vfi_sum += (pc_j / _Point) * MathMin(vol_j, VFI_VCoef * vol_j);
-            }
-            count++;
-        }
-        
-        vfi_buffer[i] = count > 0 ? vfi_sum / count : 0.0;
-        
-        // Calculate EMA of VFI
-        if(i == 0)
-        {
-            vfi_ema_buffer[i] = vfi_buffer[i];
-        }
-        else
-        {
-            double alpha = 2.0 / (VFI_SignalLength + 1.0);
-            vfi_ema_buffer[i] = alpha * vfi_buffer[i] + (1.0 - alpha) * vfi_ema_buffer[i-1];
-        }
+        vfi_sum += vcp;
     }
     
-    return vfi_buffer[0];
+    // Return average VFI value
+    return VFI_Length > 0 ? vfi_sum / VFI_Length : 0.0;
 }
 
 //+------------------------------------------------------------------+
@@ -684,29 +646,21 @@ double CalculateVFI(int index)
 //+------------------------------------------------------------------+
 double GetVFI_EMA(int index)
 {
-    static double vfi_ema_buffer[];
+    static double ema_buffer[];
     static bool initialized = false;
     
     if(!initialized)
     {
-        ArraySetAsSeries(vfi_ema_buffer, true);
-        ArrayResize(vfi_ema_buffer, VFI_Length + 50);
+        ArraySetAsSeries(ema_buffer, true);
+        ArrayResize(ema_buffer, VFI_SignalLength + 50);
         initialized = true;
     }
     
-    // This will be calculated in CalculateVFI function
-    CalculateVFI(index);
-    
-    // Calculate EMA of VFI for the requested index
-    MqlRates rates[];
-    ArraySetAsSeries(rates, true);
-    
-    int copied = CopyRates(_Symbol, PERIOD_CURRENT, index, VFI_SignalLength + 5, rates);
-    if(copied < VFI_SignalLength) return 0.0;
-    
-    double ema = 0.0;
+    // Calculate EMA of VFI values
     double alpha = 2.0 / (VFI_SignalLength + 1.0);
+    double ema = 0.0;
     
+    // Get VFI values for EMA calculation
     for(int i = VFI_SignalLength - 1; i >= 0; i--)
     {
         double vfi_val = CalculateVFI(index + i);
