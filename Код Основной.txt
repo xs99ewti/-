@@ -146,6 +146,14 @@ else if(profit_growth > MAX_GROWTH)
         Print("VFI Signal Length: ", VFI_SignalLength);
         Print("VFI Strict Mode: ", VFI_StrictMode);
         Print("VFI Use Real Volume: ", VFI_UseRealVolume);
+        Print("=== MACD Parameters ===");
+        Print("MACD Filter Enabled: ", UseMACDFilter);
+        Print("MACD Fast Length: ", MACD_FastLength);
+        Print("MACD Slow Length: ", MACD_SlowLength);
+        Print("MACD Signal Length: ", MACD_SignalLength);
+        Print("MACD Timeframe: ", EnumToString(MACD_Timeframe));
+        Print("MACD Strict Mode: ", MACD_StrictMode);
+        Print("MACD Use For Early Close: ", MACD_UseForEarlyClose);
         Print("Final Criterion: ", criterion);
     }
     
@@ -495,11 +503,22 @@ input int VFI_SignalLength = 5;               // VFI signal EMA length
 input bool VFI_UseRealVolume = true;          // Use real volume
 input bool VFI_StrictMode = false;            // Strict filtering mode (both VFI > EMA AND > 0)
 
+// MACD Filter Settings
+input group "=== MACD Filter Settings ==="
+input bool UseMACDFilter = false;             // Use MACD filter
+input int MACD_FastLength = 12;               // MACD Fast EMA period
+input int MACD_SlowLength = 26;               // MACD Slow EMA period
+input int MACD_SignalLength = 9;              // MACD Signal SMA period
+input ENUM_TIMEFRAMES MACD_Timeframe = PERIOD_CURRENT; // MACD Timeframe
+input bool MACD_StrictMode = false;           // Strict filtering mode (MACD > Signal AND histogram condition)
+input bool MACD_UseForEarlyClose = false;    // Use MACD for early position closure
+
 // Handles для индикаторов
 int EmaShortHandle;
 int EmaLongHandle;
 int RsiHandle;
 int VFIHandle;                               // VFI indicator handle
+int MACDHandle;                              // MACD indicator handle
 
 // Глобальные переменные
 bool isTrailingOrderPlaced = false;
@@ -597,6 +616,43 @@ int OnInit()
         Print("VFI Filter is disabled");
     }
     
+    // Initialize and validate MACD parameters
+    if(UseMACDFilter)
+    {
+        if(MACD_FastLength <= 0 || MACD_SlowLength <= 0 || MACD_SignalLength <= 0)
+        {
+            Print("ERROR: MACD periods must be greater than 0");
+            Print("Fast: ", MACD_FastLength, " Slow: ", MACD_SlowLength, " Signal: ", MACD_SignalLength);
+            return(INIT_FAILED);
+        }
+        if(MACD_FastLength >= MACD_SlowLength)
+        {
+            Print("ERROR: MACD Fast period must be less than Slow period");
+            Print("Fast: ", MACD_FastLength, " Slow: ", MACD_SlowLength);
+            return(INIT_FAILED);
+        }
+        
+        // Initialize MACD handle
+        MACDHandle = iMACD(_Symbol, MACD_Timeframe, MACD_FastLength, MACD_SlowLength, MACD_SignalLength, PRICE_CLOSE);
+        if(MACDHandle == INVALID_HANDLE)
+        {
+            Print("ERROR: Failed to create MACD indicator");
+            return(INIT_FAILED);
+        }
+        
+        Print("MACD Filter initialized successfully:");
+        Print("- MACD Fast Length: ", MACD_FastLength);
+        Print("- MACD Slow Length: ", MACD_SlowLength);
+        Print("- MACD Signal Length: ", MACD_SignalLength);
+        Print("- MACD Timeframe: ", EnumToString(MACD_Timeframe));
+        Print("- MACD Strict Mode: ", MACD_StrictMode ? "Enabled" : "Disabled");
+        Print("- MACD Use For Early Close: ", MACD_UseForEarlyClose ? "Yes" : "No");
+    }
+    else
+    {
+        Print("MACD Filter is disabled");
+    }
+    
     // Установка Magic Number для торговых операций
     trade.SetExpertMagicNumber(123456);
     
@@ -617,6 +673,13 @@ int OnInit()
     {
         Print("Testing VFI calculation...");
         TestVFICalculation();
+    }
+    
+    // Test MACD calculation if enabled
+    if(UseMACDFilter)
+    {
+        Print("Testing MACD calculation...");
+        TestMACDCalculation();
     }
     
     return(INIT_SUCCEEDED);
@@ -807,6 +870,132 @@ void TestVFICalculation()
     Print("Sell condition: ", sell_condition ? "PASS" : "FAIL");
     Print("=== End VFI Test ===");
 }
+
+//+------------------------------------------------------------------+
+//| Get MACD values (main line, signal line, histogram)             |
+//+------------------------------------------------------------------+
+bool GetMACDValues(int index, double &macd_main, double &macd_signal, double &macd_histogram)
+{
+    if(!UseMACDFilter || MACDHandle == INVALID_HANDLE)
+        return false;
+    
+    double macd_buffer[1];
+    double signal_buffer[1];
+    
+    // Get MACD main line
+    if(CopyBuffer(MACDHandle, 0, index, 1, macd_buffer) != 1)
+        return false;
+    
+    // Get MACD signal line
+    if(CopyBuffer(MACDHandle, 1, index, 1, signal_buffer) != 1)
+        return false;
+    
+    macd_main = macd_buffer[0];
+    macd_signal = signal_buffer[0];
+    macd_histogram = macd_main - macd_signal;
+    
+    return true;
+}
+
+//+------------------------------------------------------------------+
+//| Check MACD filter condition                                     |
+//+------------------------------------------------------------------+
+bool CheckMACDFilter(ENUM_ORDER_TYPE orderType)
+{
+    if(!UseMACDFilter) return true;
+    
+    double macd_current, macd_signal, macd_histogram;
+    double macd_prev, macd_signal_prev, macd_histogram_prev;
+    
+    // Get current MACD values
+    if(!GetMACDValues(0, macd_current, macd_signal, macd_histogram))
+    {
+        Print("WARNING: MACD calculation failed. Allowing trade.");
+        return true; // Allow trading if calculation fails
+    }
+    
+    // Get previous MACD values for histogram trend detection
+    if(!GetMACDValues(1, macd_prev, macd_signal_prev, macd_histogram_prev))
+    {
+        Print("WARNING: Previous MACD calculation failed. Using current values only.");
+        macd_histogram_prev = macd_histogram;
+    }
+    
+    bool macd_condition = false;
+    
+    if(orderType == ORDER_TYPE_BUY)
+    {
+        if(MACD_StrictMode)
+        {
+            // Strict mode: MACD > Signal AND histogram > 0
+            macd_condition = (macd_current > macd_signal && macd_histogram > 0.0);
+        }
+        else
+        {
+            // Soft mode: MACD > Signal OR histogram growing
+            bool histogram_growing = (macd_histogram > macd_histogram_prev);
+            macd_condition = (macd_current > macd_signal || histogram_growing);
+        }
+    }
+    else if(orderType == ORDER_TYPE_SELL)
+    {
+        if(MACD_StrictMode)
+        {
+            // Strict mode: MACD < Signal AND histogram < 0
+            macd_condition = (macd_current < macd_signal && macd_histogram < 0.0);
+        }
+        else
+        {
+            // Soft mode: MACD < Signal OR histogram falling
+            bool histogram_falling = (macd_histogram < macd_histogram_prev);
+            macd_condition = (macd_current < macd_signal || histogram_falling);
+        }
+    }
+    
+    // Log MACD values for debugging
+    if(UseMACDFilter)
+    {
+        Print("MACD Filter Check - Main: ", NormalizeDouble(macd_current, 6), 
+              " Signal: ", NormalizeDouble(macd_signal, 6),
+              " Histogram: ", NormalizeDouble(macd_histogram, 6),
+              " Hist Prev: ", NormalizeDouble(macd_histogram_prev, 6),
+              " Order: ", EnumToString(orderType),
+              " Mode: ", MACD_StrictMode ? "Strict" : "Soft",
+              " Condition: ", macd_condition ? "PASS" : "FAIL");
+    }
+    
+    return macd_condition;
+}
+
+//+------------------------------------------------------------------+
+//| Test MACD calculation (for debugging)                           |
+//+------------------------------------------------------------------+
+void TestMACDCalculation()
+{
+    if(!UseMACDFilter) return;
+    
+    Print("=== MACD Calculation Test ===");
+    
+    double macd_main, macd_signal, macd_histogram;
+    if(GetMACDValues(0, macd_main, macd_signal, macd_histogram))
+    {
+        Print("MACD Main Value: ", NormalizeDouble(macd_main, 6));
+        Print("MACD Signal Value: ", NormalizeDouble(macd_signal, 6));
+        Print("MACD Histogram Value: ", NormalizeDouble(macd_histogram, 6));
+        
+        // Test both buy and sell conditions
+        bool buy_condition = CheckMACDFilter(ORDER_TYPE_BUY);
+        bool sell_condition = CheckMACDFilter(ORDER_TYPE_SELL);
+        
+        Print("Buy condition: ", buy_condition ? "PASS" : "FAIL");
+        Print("Sell condition: ", sell_condition ? "PASS" : "FAIL");
+    }
+    else
+    {
+        Print("ERROR: Failed to get MACD values");
+    }
+    Print("=== End MACD Test ===");
+}
     
 void CheckForOpen()
 {
@@ -843,7 +1032,15 @@ void CheckForOpen()
         // Check VFI filter before opening position
         if(CheckVFIFilter(signal))
         {
-            OpenPosition(signal);
+            // Check MACD filter if enabled
+            if(CheckMACDFilter(signal))
+            {
+                OpenPosition(signal);
+            }
+            else
+            {
+                Print("Trade signal filtered out by MACD: ", EnumToString(signal));
+            }
         }
         else
         {
@@ -867,6 +1064,29 @@ void CheckForClose()
     if(type == POSITION_TYPE_SELL && rt[0].open < ma[0] && rt[0].close > ma[0])
         signal = true;
 
+    // Check MACD for early closure if enabled
+    if(!signal && MACD_UseForEarlyClose)
+    {
+        if(type == POSITION_TYPE_BUY)
+        {
+            // Close buy position if MACD shows bearish signal
+            if(!CheckMACDFilter(ORDER_TYPE_BUY))
+            {
+                signal = true;
+                Print("Early closure triggered by MACD for BUY position");
+            }
+        }
+        else if(type == POSITION_TYPE_SELL)
+        {
+            // Close sell position if MACD shows bullish signal
+            if(!CheckMACDFilter(ORDER_TYPE_SELL))
+            {
+                signal = true;
+                Print("Early closure triggered by MACD for SELL position");
+            }
+        }
+    }
+
     if(signal)
         trade.PositionClose(_Symbol, 3);
 }
@@ -880,6 +1100,9 @@ void OnDeinit(const int reason)
     IndicatorRelease(EmaShortHandle);
     IndicatorRelease(EmaLongHandle);
     IndicatorRelease(RsiHandle);
+    IndicatorRelease(MAHandle);
+    if(UseMACDFilter && MACDHandle != INVALID_HANDLE)
+        IndicatorRelease(MACDHandle);
     
     // Удаляем все информационные метки
     DeleteNewsLabels();
@@ -1166,6 +1389,19 @@ void OpenPosition(ENUM_ORDER_TYPE orderType)
         logMessage += StringFormat("VFI Current: %.4f\n", vfi_current);
         logMessage += StringFormat("VFI EMA: %.4f\n", vfi_ema);
         logMessage += StringFormat("VFI Filter Mode: %s\n", VFI_StrictMode ? "Strict" : "Soft");
+    }
+    
+    // Add MACD information to log
+    if(UseMACDFilter)
+    {
+        double macd_main, macd_signal, macd_histogram;
+        if(GetMACDValues(0, macd_main, macd_signal, macd_histogram))
+        {
+            logMessage += StringFormat("MACD Main: %.6f\n", macd_main);
+            logMessage += StringFormat("MACD Signal: %.6f\n", macd_signal);
+            logMessage += StringFormat("MACD Histogram: %.6f\n", macd_histogram);
+            logMessage += StringFormat("MACD Filter Mode: %s\n", MACD_StrictMode ? "Strict" : "Soft");
+        }
     }
     
     // Получаем информацию о счете
