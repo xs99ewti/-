@@ -825,6 +825,9 @@ bool CheckVFI_Crossover(ENUM_ORDER_TYPE orderType)
         return true; // Allow trading if calculation fails
     }
     
+    // Small tolerance for floating point comparison
+    const double TOLERANCE = 0.0001;
+    
     bool crossover_detected = false;
     datetime currentTime = TimeCurrent();
     datetime currentBarTime = iTime(_Symbol, PERIOD_CURRENT, 0);
@@ -836,7 +839,7 @@ bool CheckVFI_Crossover(ENUM_ORDER_TYPE orderType)
         if(orderType == ORDER_TYPE_BUY)
         {
             // Buy signal: VFI crosses EMA from below (previous VFI <= EMA, current VFI > EMA)
-            if(prevVFI <= prevVFI_EMA && vfi_current > vfi_ema)
+            if((prevVFI <= prevVFI_EMA + TOLERANCE) && (vfi_current > vfi_ema + TOLERANCE))
             {
                 crossover_detected = true;
                 vfiCrossoverBuy = true;
@@ -852,7 +855,7 @@ bool CheckVFI_Crossover(ENUM_ORDER_TYPE orderType)
         else if(orderType == ORDER_TYPE_SELL)
         {
             // Sell signal: VFI crosses EMA from above (previous VFI >= EMA, current VFI < EMA)
-            if(prevVFI >= prevVFI_EMA && vfi_current < vfi_ema)
+            if((prevVFI >= prevVFI_EMA - TOLERANCE) && (vfi_current < vfi_ema - TOLERANCE))
             {
                 crossover_detected = true; 
                 vfiCrossoverSell = true;
