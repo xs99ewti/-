@@ -46,6 +46,48 @@
 #property indicator_width5  3
 #property indicator_style5  STYLE_SOLID
 
+//+------------------------------------------------------------------+
+//| Function declarations                                            |
+//+------------------------------------------------------------------+
+bool IsRussianSystem();
+string GetLocalizedText(string key);
+string GetComputerUserName();
+string GetCurrentDateTime();
+string GetSessionUptime();
+void SendAlert(AlertType alert_type, string message, int bar_index = 0);
+void CalculateDynamicZones(int current_bar);
+void CreateZoneObjects(int current_bar);
+bool IsLocalMaximum(const double &buffer[], int pos, int lookback = 5);
+bool IsLocalMinimum(const double &buffer[], int pos, int lookback = 5);
+void DetectDivergences(const double &close[], int current_bar);
+void DrawDivergenceLine(string name, int bar1, int bar2, color line_color, bool is_bullish);
+void UpdateInfoPanel(int current_bar);
+void CheckVolumeData();
+void CheckSignalsAndAlerts(int current_bar, const double &close[]);
+double CalculateStdDev(int pos, int period);
+int CopyTickVolumeData(string symbol, ENUM_TIMEFRAMES timeframe, int start_pos, int count, long &tick_volume_array[]);
+
+//+------------------------------------------------------------------+
+//| Custom tick volume copy function                                |
+//+------------------------------------------------------------------+
+int CopyTickVolumeData(string symbol, ENUM_TIMEFRAMES timeframe, int start_pos, int count, long &tick_volume_array[])
+{
+    MqlRates rates[];
+    int copied = CopyRates(symbol, timeframe, start_pos, count, rates);
+    
+    if(copied <= 0)
+        return 0;
+    
+    ArrayResize(tick_volume_array, copied);
+    
+    for(int i = 0; i < copied; i++)
+    {
+        tick_volume_array[i] = rates[i].tick_volume;
+    }
+    
+    return copied;
+}
+
 //--- Original input parameters
 input int      VFI_Length = 130;        // VFI length
 input double   Coef = 0.2;              // Coefficient
@@ -128,6 +170,7 @@ const string SYSTEM_UTC_TIME = "2025-07-28 20:04:06";    // Базовое вр�
 
 //--- Alert system variables
 datetime last_alert_time[10]; // Array to store last alert times for different types
+int last_alert_bar[10]; // Array to store last alert bar for different types
 enum AlertType
 {
     ALERT_ZERO_CROSS_UP = 0,
@@ -444,7 +487,12 @@ void SendAlert(AlertType alert_type, string message, int bar_index = 0)
     if(current_time - last_alert_time[alert_type] < 60) // 1 minute minimum between same type alerts
         return;
     
+    // Prevent duplicate alerts on the same bar (candle)
+    if(last_alert_bar[alert_type] == bar_index && bar_index > 0)
+        return;
+    
     last_alert_time[alert_type] = current_time;
+    last_alert_bar[alert_type] = bar_index;
     
     // ИНТЕГРАЦИЯ: Добавляем информацию о пользователе в алерт
     string full_message = "[" + SYSTEM_USER + "] " + Symbol() + " - " + message;
@@ -945,6 +993,7 @@ int OnInit()
     
     // Initialize alert times
     ArrayInitialize(last_alert_time, 0);
+    ArrayInitialize(last_alert_bar, -1);
     
     // Reset calculation counter
     last_calculated = 0;
@@ -1311,12 +1360,12 @@ int OnCalculate(const int rates_total,
         // Determine which volumes to use
         bool use_real = UseRealVolume && real_volumes_available;
         
-        for(int j = vol_start; j < i; j++)
+        for(int j = vol_start; j < i && j < ArraySize(tick_volume) && j < ArraySize(volume); j++)
         {
-            double vol_value = use_real ? (double)volume[j] : (double)tick_volume[j];
+            long vol_value = use_real ? volume[j] : tick_volume[j];
             if(vol_value > 0) // Exclude zero volumes
             {
-                vave += vol_value;
+                vave += (double)vol_value;
                 vol_count++;
             }
         }
@@ -1334,11 +1383,15 @@ int OnCalculate(const int rates_total,
         double vmax = vave * VCoef;
         
         //--- calculate vc (min of current volume and vmax)
-        double vol_current = use_real ? (double)volume[i] : (double)tick_volume[i];
+        long vol_current = 0;
+        if(i < ArraySize(volume) && i < ArraySize(tick_volume))
+        {
+            vol_current = use_real ? volume[i] : tick_volume[i];
+        }
         if(vol_current <= 0)
-            vol_current = vave; // Use average value
+            vol_current = (long)vave; // Use average value
             
-        double vc = MathMin(vol_current, vmax);
+        double vc = MathMin((double)vol_current, vmax);
         
         //--- calculate mf (money flow)
         double mf = 0.0;
@@ -1451,53 +1504,43 @@ void CheckSignalsAndAlerts(int current_bar, const double &close[])
        current_ema == EMPTY_VALUE || prev_ema == EMPTY_VALUE)
         return;
     
-    // Check Zero Line Crossings
-    if(AlertOnZeroCross)
+    // Check EMA Crossings (Primary signals - VFI crosses EMA)
+    if(AlertOnEMACross)
+    {
+        // VFI crosses above EMA (BUY signal)
+        if(prev_vfi <= prev_ema && current_vfi > current_ema)
+        {
+            if(ShowArrows)
+            {
+                BuyArrow_Buffer[current_bar] = MathMin(current_vfi, current_ema) - MathAbs(current_vfi - current_ema) * 0.1;
+                total_signals_buy++; // ИНТЕГРАЦИЯ: Подсчет сигналов
+            }
+            SendAlert(ALERT_EMA_CROSS_UP, GetLocalizedText("vfi_ema_cross_up"), current_bar);
+        }
+        // VFI crosses below EMA (SELL signal)
+        else if(prev_vfi >= prev_ema && current_vfi < current_ema)
+        {
+            if(ShowArrows)
+            {
+                SellArrow_Buffer[current_bar] = MathMax(current_vfi, current_ema) + MathAbs(current_vfi - current_ema) * 0.1;
+                total_signals_sell++; // ИНТЕГРАЦИЯ: Подсчет сигналов
+            }
+            SendAlert(ALERT_EMA_CROSS_DOWN, GetLocalizedText("vfi_ema_cross_down"), current_bar);
+        }
+    }
+    
+    // Check Zero Line Crossings (Secondary alerts only, no signal arrows)
+    if(AlertOnZeroCross && !AlertOnEMACross) // Only if EMA cross alerts are disabled
     {
         // VFI crosses above zero line
         if(prev_vfi <= 0 && current_vfi > 0)
         {
-            if(ShowArrows)
-            {
-                BuyArrow_Buffer[current_bar] = current_vfi - MathAbs(current_vfi) * 0.1;
-                total_signals_buy++; // ИНТЕГРАЦИЯ: Подсчет сигналов
-            }
             SendAlert(ALERT_ZERO_CROSS_UP, GetLocalizedText("vfi_cross_up"), current_bar);
         }
         // VFI crosses below zero line
         else if(prev_vfi >= 0 && current_vfi < 0)
         {
-            if(ShowArrows)
-            {
-                SellArrow_Buffer[current_bar] = current_vfi + MathAbs(current_vfi) * 0.1;
-                total_signals_sell++; // ИНТЕГРАЦИЯ: Подсчет сигналов
-            }
             SendAlert(ALERT_ZERO_CROSS_DOWN, GetLocalizedText("vfi_cross_down"), current_bar);
-        }
-    }
-    
-    // Check EMA Crossings
-    if(AlertOnEMACross)
-    {
-        // VFI crosses above EMA
-        if(prev_vfi <= prev_ema && current_vfi > current_ema)
-        {
-            if(ShowArrows && BuyArrow_Buffer[current_bar] == EMPTY_VALUE)
-            {
-                BuyArrow_Buffer[current_bar] = MathMin(current_vfi, current_ema) - MathAbs(current_vfi) * 0.05;
-                total_signals_buy++; // ИНТЕГРАЦИЯ: Подсчет сигналов
-            }
-            SendAlert(ALERT_EMA_CROSS_UP, GetLocalizedText("vfi_ema_cross_up"), current_bar);
-        }
-        // VFI crosses below EMA
-        else if(prev_vfi >= prev_ema && current_vfi < current_ema)
-        {
-            if(ShowArrows && SellArrow_Buffer[current_bar] == EMPTY_VALUE)
-            {
-                SellArrow_Buffer[current_bar] = MathMax(current_vfi, current_ema) + MathAbs(current_vfi) * 0.05;
-                total_signals_sell++; // ИНТЕГРАЦИЯ: Подсчет сигналов
-            }
-            SendAlert(ALERT_EMA_CROSS_DOWN, GetLocalizedText("vfi_ema_cross_down"), current_bar);
         }
     }
     
