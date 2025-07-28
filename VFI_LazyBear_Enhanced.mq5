@@ -1492,7 +1492,7 @@ int OnCalculate(const int rates_total,
 //+------------------------------------------------------------------+
 void CheckSignalsAndAlerts(int current_bar, const double &close[])
 {
-    if(current_bar < 2)
+    if(current_bar < 2 || current_bar >= ArraySize(VFI_Buffer) || current_bar >= ArraySize(VFI_EMA_Buffer))
         return;
     
     double current_vfi = VFI_Buffer[current_bar];
@@ -1510,7 +1510,7 @@ void CheckSignalsAndAlerts(int current_bar, const double &close[])
         // VFI crosses above EMA (BUY signal)
         if(prev_vfi <= prev_ema && current_vfi > current_ema)
         {
-            if(ShowArrows)
+            if(ShowArrows && current_bar < ArraySize(BuyArrow_Buffer))
             {
                 BuyArrow_Buffer[current_bar] = MathMin(current_vfi, current_ema) - MathAbs(current_vfi - current_ema) * 0.1;
                 total_signals_buy++; // ИНТЕГРАЦИЯ: Подсчет сигналов
@@ -1520,7 +1520,7 @@ void CheckSignalsAndAlerts(int current_bar, const double &close[])
         // VFI crosses below EMA (SELL signal)
         else if(prev_vfi >= prev_ema && current_vfi < current_ema)
         {
-            if(ShowArrows)
+            if(ShowArrows && current_bar < ArraySize(SellArrow_Buffer))
             {
                 SellArrow_Buffer[current_bar] = MathMax(current_vfi, current_ema) + MathAbs(current_vfi - current_ema) * 0.1;
                 total_signals_sell++; // ИНТЕГРАЦИЯ: Подсчет сигналов
@@ -1545,12 +1545,12 @@ void CheckSignalsAndAlerts(int current_bar, const double &close[])
     }
     
     // Check Zone Entries
-    if(AlertOnZones && ShowAutoZones)
+    if(AlertOnZones && ShowAutoZones && dynamic_overbought_level != 0 && dynamic_oversold_level != 0)
     {
         // Entering overbought zone
         if(prev_vfi < dynamic_overbought_level && current_vfi >= dynamic_overbought_level)
         {
-            if(ShowArrows && SellArrow_Buffer[current_bar] == EMPTY_VALUE)
+            if(ShowArrows && current_bar < ArraySize(SellArrow_Buffer) && SellArrow_Buffer[current_bar] == EMPTY_VALUE)
             {
                 SellArrow_Buffer[current_bar] = current_vfi + MathAbs(current_vfi) * 0.05;
                 total_signals_sell++; // ИНТЕГРАЦИЯ: Подсчет сигналов
@@ -1560,7 +1560,7 @@ void CheckSignalsAndAlerts(int current_bar, const double &close[])
         // Entering oversold zone
         else if(prev_vfi > dynamic_oversold_level && current_vfi <= dynamic_oversold_level)
         {
-            if(ShowArrows && BuyArrow_Buffer[current_bar] == EMPTY_VALUE)
+            if(ShowArrows && current_bar < ArraySize(BuyArrow_Buffer) && BuyArrow_Buffer[current_bar] == EMPTY_VALUE)
             {
                 BuyArrow_Buffer[current_bar] = current_vfi - MathAbs(current_vfi) * 0.05;
                 total_signals_buy++; // ИНТЕГРАЦИЯ: Подсчет сигналов
