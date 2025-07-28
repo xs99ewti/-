@@ -47,6 +47,21 @@
 #property indicator_style5  STYLE_SOLID
 
 //+------------------------------------------------------------------+
+//| Enums and types                                                 |
+//+------------------------------------------------------------------+
+enum AlertType
+{
+    ALERT_ZERO_CROSS_UP = 0,
+    ALERT_ZERO_CROSS_DOWN = 1,
+    ALERT_EMA_CROSS_UP = 2,
+    ALERT_EMA_CROSS_DOWN = 3,
+    ALERT_OVERBOUGHT = 4,
+    ALERT_OVERSOLD = 5,
+    ALERT_BULLISH_DIV = 6,
+    ALERT_BEARISH_DIV = 7
+};
+
+//+------------------------------------------------------------------+
 //| Function declarations                                            |
 //+------------------------------------------------------------------+
 bool IsRussianSystem();
@@ -171,17 +186,6 @@ const string SYSTEM_UTC_TIME = "2025-07-28 20:04:06";    // Базовое вр�
 //--- Alert system variables
 datetime last_alert_time[10]; // Array to store last alert times for different types
 int last_alert_bar[10]; // Array to store last alert bar for different types
-enum AlertType
-{
-    ALERT_ZERO_CROSS_UP = 0,
-    ALERT_ZERO_CROSS_DOWN = 1,
-    ALERT_EMA_CROSS_UP = 2,
-    ALERT_EMA_CROSS_DOWN = 3,
-    ALERT_OVERBOUGHT = 4,
-    ALERT_OVERSOLD = 5,
-    ALERT_BULLISH_DIV = 6,
-    ALERT_BEARISH_DIV = 7
-};
 
 //--- Zone calculation variables
 double dynamic_overbought_level = 0;
