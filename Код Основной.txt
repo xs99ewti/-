@@ -532,6 +532,16 @@ bool isDayChanged = false;       // Флаг смены дня
 int CurrentTrailingStop = 0;     // Текущее значение trailing stop
 int CurrentTrailingStart = 0;    // Текущее значение начала trailing
 
+// Глобальные переменные для отслеживания уведомлений только один раз на свече
+datetime lastNotificationBuyTime = 0;     // Время последнего уведомления о покупке
+datetime lastNotificationSellTime = 0;    // Время последнего уведомления о продаже
+datetime lastVFICrossingTime = 0;         // Время последнего пересечения VFI
+
+// Глобальные переменные для отслеживания пересечений VFI
+double prevVFI = 0;              // Предыдущее значение VFI
+double prevVFI_EMA = 0;          // Предыдущее значение VFI EMA
+bool VFI_CrossingInitialized = false;  // Флаг инициализации отслеживания пересечений
+
 // ID объектов для отображения информации о новостях
 string newsLabelBase = "NewsInfo_";
 int newsLabelsCount = 0;
@@ -656,6 +666,16 @@ int OnInit()
     // Установка Magic Number для торговых операций
     trade.SetExpertMagicNumber(123456);
     
+    // Инициализация переменных отслеживания пересечений VFI
+    VFI_CrossingInitialized = false;
+    prevVFI = 0;
+    prevVFI_EMA = 0;
+    lastNotificationBuyTime = 0;
+    lastNotificationSellTime = 0;
+    lastVFICrossingTime = 0;
+    
+    Print("VFI Crossing tracking initialized");
+    
     // Инициализация времени обновления новостей
     nextNewsUpdate = 0;
     
@@ -706,6 +726,168 @@ int OnInit()
     }
     
     return(INIT_SUCCEEDED);
+}
+
+//+------------------------------------------------------------------+
+//| Определение пересечения VFI и его сигнальной линии (EMA)         |
+//+------------------------------------------------------------------+
+int DetectVFICrossing()
+{
+    if(!UseVFIFilter) return 0;
+    
+    double currentVFI = CalculateVFI(0);
+    double currentVFI_EMA = GetVFI_EMA(0);
+    
+    // Получаем предыдущие значения
+    double previousVFI = CalculateVFI(1);
+    double previousVFI_EMA = GetVFI_EMA(1);
+    
+    // Проверяем валидность данных
+    if(!ValidateVFIData(currentVFI, currentVFI_EMA, previousVFI, previousVFI_EMA))
+    {
+        Print("❌ VFI Crossing detection aborted due to invalid data");
+        return 0; // Нет пересечения при некорректных данных
+    }
+    
+    // Инициализация при первом запуске
+    if(!VFI_CrossingInitialized)
+    {
+        prevVFI = previousVFI;
+        prevVFI_EMA = previousVFI_EMA;
+        VFI_CrossingInitialized = true;
+        Print("✅ VFI Crossing tracking initialized with values: VFI=", NormalizeDouble(prevVFI, 4), 
+              " EMA=", NormalizeDouble(prevVFI_EMA, 4));
+        return 0; // Нет сигнала при инициализации
+    }
+    
+    // Отладочная информация
+    if(MQLInfoInteger(MQL_DEBUG))
+    {
+        Print("🔍 VFI Crossing Check:");
+        Print("  Current VFI: ", NormalizeDouble(currentVFI, 4));
+        Print("  Current EMA: ", NormalizeDouble(currentVFI_EMA, 4));
+        Print("  Previous VFI: ", NormalizeDouble(prevVFI, 4));
+        Print("  Previous EMA: ", NormalizeDouble(prevVFI_EMA, 4));
+    }
+    
+    int crossingType = 0;
+    
+    // Проверяем пересечение вверх (бычий сигнал)
+    // VFI пересекает EMA снизу вверх
+    if(prevVFI <= prevVFI_EMA && currentVFI > currentVFI_EMA)
+    {
+        // Дополнительная проверка на значительность пересечения
+        double crossingStrength = MathAbs(currentVFI - currentVFI_EMA) / MathMax(MathAbs(currentVFI), MathAbs(currentVFI_EMA));
+        if(crossingStrength > 0.01) // Минимальная значимость пересечения 1%
+        {
+            crossingType = 1; // Бычье пересечение
+            Print("🟢 VFI Bullish Crossing Detected: VFI(", NormalizeDouble(currentVFI, 4), 
+                  ") crossed above EMA(", NormalizeDouble(currentVFI_EMA, 4), ") with strength ", 
+                  NormalizeDouble(crossingStrength * 100, 2), "%");
+        }
+        else
+        {
+            Print("⚪ VFI Bullish crossing too weak (strength: ", NormalizeDouble(crossingStrength * 100, 2), "%)");
+        }
+    }
+    // Проверяем пересечение вниз (медвежий сигнал)  
+    // VFI пересекает EMA сверху вниз
+    else if(prevVFI >= prevVFI_EMA && currentVFI < currentVFI_EMA)
+    {
+        // Дополнительная проверка на значительность пересечения
+        double crossingStrength = MathAbs(currentVFI - currentVFI_EMA) / MathMax(MathAbs(currentVFI), MathAbs(currentVFI_EMA));
+        if(crossingStrength > 0.01) // Минимальная значимость пересечения 1%
+        {
+            crossingType = -1; // Медвежье пересечение
+            Print("🔴 VFI Bearish Crossing Detected: VFI(", NormalizeDouble(currentVFI, 4), 
+                  ") crossed below EMA(", NormalizeDouble(currentVFI_EMA, 4), ") with strength ", 
+                  NormalizeDouble(crossingStrength * 100, 2), "%");
+        }
+        else
+        {
+            Print("⚪ VFI Bearish crossing too weak (strength: ", NormalizeDouble(crossingStrength * 100, 2), "%)");
+        }
+    }
+    
+    // Сохраняем текущие значения для следующего вызова
+    prevVFI = currentVFI;
+    prevVFI_EMA = currentVFI_EMA;
+    
+    return crossingType;
+}
+
+//+------------------------------------------------------------------+
+//| Проверка уведомления только один раз на свече                    |
+//+------------------------------------------------------------------+
+bool ShouldSendNotification(ENUM_ORDER_TYPE orderType)
+{
+    datetime currentBarTime = iTime(_Symbol, PERIOD_CURRENT, 0);
+    
+    if(orderType == ORDER_TYPE_BUY)
+    {
+        if(currentBarTime != lastNotificationBuyTime)
+        {
+            lastNotificationBuyTime = currentBarTime;
+            return true;
+        }
+    }
+    else if(orderType == ORDER_TYPE_SELL)
+    {
+        if(currentBarTime != lastNotificationSellTime)
+        {
+            lastNotificationSellTime = currentBarTime;
+            return true;
+        }
+    }
+    
+    return false; // Уведомление на этой свече уже было отправлено
+}
+
+//+------------------------------------------------------------------+
+//| Валидация данных VFI для предотвращения ложных сигналов          |
+//+------------------------------------------------------------------+
+bool ValidateVFIData(double vfi_current, double vfi_ema, double vfi_previous, double vfi_ema_previous)
+{
+    // Проверка на нулевые или некорректные значения
+    if(vfi_current == 0.0 || vfi_ema == 0.0 || vfi_previous == 0.0 || vfi_ema_previous == 0.0)
+    {
+        Print("⚠️ VFI Validation Failed: Zero values detected");
+        return false;
+    }
+    
+    // Проверка на слишком большие значения (возможная ошибка расчета)
+    double maxAllowedValue = 10000.0;
+    if(MathAbs(vfi_current) > maxAllowedValue || MathAbs(vfi_ema) > maxAllowedValue ||
+       MathAbs(vfi_previous) > maxAllowedValue || MathAbs(vfi_ema_previous) > maxAllowedValue)
+    {
+        Print("⚠️ VFI Validation Failed: Values too large (>", maxAllowedValue, ")");
+        return false;
+    }
+    
+    // Проверка на разумность изменения (не слишком резкое)
+    double maxChangePercent = 500.0; // Максимальное изменение 500%
+    
+    if(vfi_previous != 0.0)
+    {
+        double vfi_change_percent = MathAbs((vfi_current - vfi_previous) / vfi_previous) * 100.0;
+        if(vfi_change_percent > maxChangePercent)
+        {
+            Print("⚠️ VFI Validation Failed: Too rapid VFI change (", NormalizeDouble(vfi_change_percent, 2), "%)");
+            return false;
+        }
+    }
+    
+    if(vfi_ema_previous != 0.0)
+    {
+        double ema_change_percent = MathAbs((vfi_ema - vfi_ema_previous) / vfi_ema_previous) * 100.0;
+        if(ema_change_percent > maxChangePercent)
+        {
+            Print("⚠️ VFI Validation Failed: Too rapid EMA change (", NormalizeDouble(ema_change_percent, 2), "%)");
+            return false;
+        }
+    }
+    
+    return true; // Данные валидны
 }
 
 //+------------------------------------------------------------------+
@@ -782,7 +964,7 @@ double GetVFI_EMA(int index)
 }
 
 //+------------------------------------------------------------------+
-//| Check VFI filter condition                                       |
+//| Check VFI filter condition with crossing logic                   |
 //+------------------------------------------------------------------+
 bool CheckVFIFilter(ENUM_ORDER_TYPE orderType)
 {
@@ -794,6 +976,9 @@ bool CheckVFIFilter(ENUM_ORDER_TYPE orderType)
         Print("ERROR: Invalid VFI parameters. Filter disabled for this signal.");
         return true; // Allow trading if parameters are invalid
     }
+    
+    // Проверяем пересечение VFI и EMA
+    int crossingType = DetectVFICrossing();
     
     double vfi_current = CalculateVFI(0);
     double vfi_ema = GetVFI_EMA(0);
@@ -809,27 +994,49 @@ bool CheckVFIFilter(ENUM_ORDER_TYPE orderType)
     
     if(orderType == ORDER_TYPE_BUY)
     {
-        if(VFI_StrictMode)
+        // Проверяем бычье пересечение (VFI пересекает EMA вверх)
+        if(crossingType == 1)
         {
-            // Strict mode: VFI must be above EMA AND above zero
+            vfi_condition = true;
+            
+            // Проверяем, нужно ли отправить уведомление
+            if(ShouldSendNotification(ORDER_TYPE_BUY))
+            {
+                Print("🟢 VFI Buy Signal: Bullish crossing detected");
+            }
+        }
+        else if(VFI_StrictMode)
+        {
+            // В строгом режиме без пересечения - старая логика как резервная
             vfi_condition = (vfi_current > vfi_ema && vfi_current > 0.0);
         }
         else
         {
-            // Soft mode: VFI above EMA OR above zero
+            // В мягком режиме без пересечения - старая логика как резервная
             vfi_condition = (vfi_current > vfi_ema || vfi_current > 0.0);
         }
     }
     else if(orderType == ORDER_TYPE_SELL)
     {
-        if(VFI_StrictMode)
+        // Проверяем медвежье пересечение (VFI пересекает EMA вниз)
+        if(crossingType == -1)
         {
-            // Strict mode: VFI must be below EMA AND below zero
+            vfi_condition = true;
+            
+            // Проверяем, нужно ли отправить уведомление
+            if(ShouldSendNotification(ORDER_TYPE_SELL))
+            {
+                Print("🔴 VFI Sell Signal: Bearish crossing detected");
+            }
+        }
+        else if(VFI_StrictMode)
+        {
+            // В строгом режиме без пересечения - старая логика как резервная
             vfi_condition = (vfi_current < vfi_ema && vfi_current < 0.0);
         }
         else
         {
-            // Soft mode: VFI below EMA OR below zero
+            // В мягком режиме без пересечения - старая логика как резервная
             vfi_condition = (vfi_current < vfi_ema || vfi_current < 0.0);
         }
     }
@@ -839,6 +1046,7 @@ bool CheckVFIFilter(ENUM_ORDER_TYPE orderType)
     {
         Print("VFI Filter Check - Current: ", NormalizeDouble(vfi_current, 4), 
               " EMA: ", NormalizeDouble(vfi_ema, 4),
+              " Crossing: ", crossingType == 1 ? "BULLISH" : (crossingType == -1 ? "BEARISH" : "NONE"),
               " Order: ", EnumToString(orderType),
               " Mode: ", VFI_StrictMode ? "Strict" : "Soft",
               " Condition: ", vfi_condition ? "PASS" : "FAIL");
@@ -995,6 +1203,55 @@ void TestMACDCalculation()
         Print("ERROR: Failed to get MACD values");
     }
     Print("=== End MACD Test ===");
+}
+
+//+------------------------------------------------------------------+
+//| Обновление отслеживания пересечений VFI (вызывается каждый тик)  |
+//+------------------------------------------------------------------+
+void UpdateVFICrossing()
+{
+    if(!UseVFIFilter) return;
+    
+    // Получаем время текущего бара
+    datetime currentBarTime = iTime(_Symbol, PERIOD_CURRENT, 0);
+    
+    // Обновляем отслеживание пересечений только на новом баре
+    if(currentBarTime != lastVFICrossingTime)
+    {
+        // Сбрасываем флаги уведомлений при смене бара только если это действительно новый бар
+        if(lastVFICrossingTime != 0) // Не сбрасываем при первом запуске
+        {
+            // При смене бара разрешаем новые уведомления
+            Print("📊 New bar detected, VFI crossing notifications reset for bar: ", TimeToString(currentBarTime));
+        }
+        
+        lastVFICrossingTime = currentBarTime;
+        
+        // Проверяем пересечение на каждом новом баре
+        DetectVFICrossing();
+    }
+    
+    // Дополнительная отладочная информация каждый тик (только в режиме отладки)
+    if(MQLInfoInteger(MQL_DEBUG))
+    {
+        static datetime lastDebugTime = 0;
+        datetime currentTime = TimeCurrent();
+        
+        // Выводим отладочную информацию не чаще раза в минуту
+        if(currentTime - lastDebugTime >= 60)
+        {
+            double currentVFI = CalculateVFI(0);
+            double currentVFI_EMA = GetVFI_EMA(0);
+            
+            Print("🔍 VFI Debug Info:");
+            Print("  Current VFI: ", NormalizeDouble(currentVFI, 4));
+            Print("  Current EMA: ", NormalizeDouble(currentVFI_EMA, 4));
+            Print("  VFI > EMA: ", currentVFI > currentVFI_EMA ? "YES" : "NO");
+            Print("  Last crossing time: ", TimeToString(lastVFICrossingTime));
+            
+            lastDebugTime = currentTime;
+        }
+    }
 }
     
 void CheckForOpen()
@@ -1184,6 +1441,9 @@ void OnTick()
             Print("Trading paused due to upcoming/active news");
         return;
     }
+
+    // Обновляем отслеживание пересечений VFI
+    UpdateVFICrossing();
 
     // Проверяем наличие новостей на текущий день
     if(!HasNewsForCurrentDay())
