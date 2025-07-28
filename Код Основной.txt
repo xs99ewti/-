@@ -532,6 +532,11 @@ bool isDayChanged = false;       // Флаг смены дня
 int CurrentTrailingStop = 0;     // Текущее значение trailing stop
 int CurrentTrailingStart = 0;    // Текущее значение начала trailing
 
+// VFI Enhanced Variables - для задач с уведомлениями и пересечениями
+datetime lastNotificationTime = 0;  // Время последнего уведомления
+double prevVFI = 0.0;              // Предыдущее значение VFI
+double prevVFI_EMA = 0.0;          // Предыдущее значение VFI EMA
+
 // ID объектов для отображения информации о новостях
 string newsLabelBase = "NewsInfo_";
 int newsLabelsCount = 0;
@@ -795,6 +800,21 @@ bool CheckVFIFilter(ENUM_ORDER_TYPE orderType)
         return true; // Allow trading if parameters are invalid
     }
     
+    // Проверка уникальности свечи
+    if(!IsNewCandle())
+    {
+        Print("VFI Filter: Not a new candle, skipping signal generation");
+        return false;
+    }
+    
+    // Проверка времени последнего уведомления
+    datetime currentCandleTime = iTime(_Symbol, PERIOD_CURRENT, 0);
+    if(currentCandleTime == lastNotificationTime)
+    {
+        Print("VFI Filter: Already sent notification for this candle");
+        return false;
+    }
+    
     double vfi_current = CalculateVFI(0);
     double vfi_ema = GetVFI_EMA(0);
     
@@ -803,6 +823,19 @@ bool CheckVFIFilter(ENUM_ORDER_TYPE orderType)
     {
         Print("WARNING: VFI calculation returned zero values. Allowing trade.");
         return true; // Allow trading if calculation fails
+    }
+    
+    // Проверка пересечения линий
+    bool crossover_condition = CheckVFICrossover(orderType);
+    if(!crossover_condition)
+    {
+        Print("VFI Filter: No crossover detected for ", EnumToString(orderType));
+        
+        // Обновляем предыдущие значения даже если пересечения нет
+        prevVFI = vfi_current;
+        prevVFI_EMA = vfi_ema;
+        
+        return false;
     }
     
     bool vfi_condition = false;
@@ -834,14 +867,31 @@ bool CheckVFIFilter(ENUM_ORDER_TYPE orderType)
         }
     }
     
-    // Log VFI values for debugging
+    // Если все условия выполнены, обновляем данные
+    if(vfi_condition)
+    {
+        lastNotificationTime = currentCandleTime;
+        Print("VFI Filter: Notification time updated to ", TimeToString(lastNotificationTime));
+    }
+    
+    // Обновляем предыдущие значения
+    prevVFI = vfi_current;
+    prevVFI_EMA = vfi_ema;
+    
+    // Enhanced logging
     if(UseVFIFilter)
     {
-        Print("VFI Filter Check - Current: ", NormalizeDouble(vfi_current, 4), 
-              " EMA: ", NormalizeDouble(vfi_ema, 4),
-              " Order: ", EnumToString(orderType),
-              " Mode: ", VFI_StrictMode ? "Strict" : "Soft",
-              " Condition: ", vfi_condition ? "PASS" : "FAIL");
+        Print("VFI Filter Enhanced Check:");
+        Print("  Current VFI: ", NormalizeDouble(vfi_current, 4));
+        Print("  Current EMA: ", NormalizeDouble(vfi_ema, 4));
+        Print("  Previous VFI: ", NormalizeDouble(prevVFI, 4));
+        Print("  Previous EMA: ", NormalizeDouble(prevVFI_EMA, 4));
+        Print("  Order Type: ", EnumToString(orderType));
+        Print("  Mode: ", VFI_StrictMode ? "Strict" : "Soft");
+        Print("  Crossover: ", crossover_condition ? "YES" : "NO");
+        Print("  Final Condition: ", vfi_condition ? "PASS" : "FAIL");
+        Print("  Last Notification: ", TimeToString(lastNotificationTime));
+        Print("  Current Candle: ", TimeToString(currentCandleTime));
     }
     
     return vfi_condition;
@@ -995,6 +1045,73 @@ void TestMACDCalculation()
         Print("ERROR: Failed to get MACD values");
     }
     Print("=== End MACD Test ===");
+}
+
+//+------------------------------------------------------------------+
+//| Проверка уникальности свечи                                     |
+//+------------------------------------------------------------------+
+bool IsNewCandle()
+{
+    static datetime lastCandleTime = 0;
+    datetime currentCandleTime = iTime(_Symbol, PERIOD_CURRENT, 0);
+    
+    if(currentCandleTime != lastCandleTime)
+    {
+        lastCandleTime = currentCandleTime;
+        return true;
+    }
+    
+    return false;
+}
+
+//+------------------------------------------------------------------+
+//| Проверка пересечения VFI и его EMA                              |
+//+------------------------------------------------------------------+
+bool CheckVFICrossover(ENUM_ORDER_TYPE orderType)
+{
+    // Получаем текущие значения
+    double vfi_current = CalculateVFI(0);
+    double vfi_ema_current = GetVFI_EMA(0);
+    
+    // Проверяем наличие предыдущих значений
+    if(prevVFI == 0.0 || prevVFI_EMA == 0.0)
+    {
+        // Инициализируем предыдущие значения при первом запуске
+        prevVFI = vfi_current;
+        prevVFI_EMA = vfi_ema_current;
+        Print("VFI Crossover: Initializing previous values - VFI: ", NormalizeDouble(prevVFI, 4), 
+              " EMA: ", NormalizeDouble(prevVFI_EMA, 4));
+        return false; // Не генерируем сигнал при инициализации
+    }
+    
+    bool crossover_detected = false;
+    
+    if(orderType == ORDER_TYPE_BUY)
+    {
+        // Проверяем пересечение VFI вверх через EMA
+        if(prevVFI <= prevVFI_EMA && vfi_current > vfi_ema_current)
+        {
+            crossover_detected = true;
+            Print("VFI Crossover BUY detected - Previous: VFI=", NormalizeDouble(prevVFI, 4), 
+                  " EMA=", NormalizeDouble(prevVFI_EMA, 4), 
+                  " Current: VFI=", NormalizeDouble(vfi_current, 4), 
+                  " EMA=", NormalizeDouble(vfi_ema_current, 4));
+        }
+    }
+    else if(orderType == ORDER_TYPE_SELL)
+    {
+        // Проверяем пересечение VFI вниз через EMA
+        if(prevVFI >= prevVFI_EMA && vfi_current < vfi_ema_current)
+        {
+            crossover_detected = true;
+            Print("VFI Crossover SELL detected - Previous: VFI=", NormalizeDouble(prevVFI, 4), 
+                  " EMA=", NormalizeDouble(prevVFI_EMA, 4), 
+                  " Current: VFI=", NormalizeDouble(vfi_current, 4), 
+                  " EMA=", NormalizeDouble(vfi_ema_current, 4));
+        }
+    }
+    
+    return crossover_detected;
 }
     
 void CheckForOpen()
