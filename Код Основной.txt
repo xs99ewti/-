@@ -693,6 +693,15 @@ int OnInit()
     {
         Print("Testing VFI calculation...");
         TestVFICalculation();
+        
+        // Дополнительная проверка инициализации пересечений
+        Print("Testing VFI crossing detection initialization...");
+        int testCrossing = DetectVFICrossing();
+        Print("Initial VFI crossing test result: ", testCrossing);
+        
+        // Полное тестирование системы пересечений
+        Print("Running comprehensive VFI crossing system test...");
+        TestVFICrossingSystem();
     }
     
     // Test MACD calculation if enabled
@@ -1206,14 +1215,81 @@ void TestMACDCalculation()
 }
 
 //+------------------------------------------------------------------+
+//| Тестирование системы пересечений VFI                             |
+//+------------------------------------------------------------------+
+void TestVFICrossingSystem()
+{
+    if(!UseVFIFilter)
+    {
+        Print("VFI Filter disabled - skipping crossing system test");
+        return;
+    }
+    
+    Print("=== VFI CROSSING SYSTEM TEST ===");
+    
+    // Тест 1: Проверка валидации данных
+    Print("Test 1: Data validation");
+    bool validationTest1 = ValidateVFIData(100.0, 50.0, 90.0, 45.0);  // Нормальные данные
+    bool validationTest2 = ValidateVFIData(0.0, 50.0, 90.0, 45.0);    // Нулевое значение
+    bool validationTest3 = ValidateVFIData(15000.0, 50.0, 90.0, 45.0); // Слишком большое значение
+    
+    Print("  Normal data validation: ", validationTest1 ? "PASS" : "FAIL");
+    Print("  Zero data validation: ", validationTest2 ? "FAIL (unexpected)" : "PASS");
+    Print("  Large data validation: ", validationTest3 ? "FAIL (unexpected)" : "PASS");
+    
+    // Тест 2: Проверка функции уведомлений
+    Print("Test 2: Notification system");
+    datetime testTime = TimeCurrent();
+    bool notifyTest1 = ShouldSendNotification(ORDER_TYPE_BUY);   // Первое уведомление
+    bool notifyTest2 = ShouldSendNotification(ORDER_TYPE_BUY);   // Повторное уведомление на той же свече
+    
+    Print("  First buy notification: ", notifyTest1 ? "PASS" : "FAIL");
+    Print("  Duplicate buy notification: ", notifyTest2 ? "FAIL (unexpected)" : "PASS");
+    
+    // Тест 3: Проверка инициализации пересечений
+    Print("Test 3: Crossing detection initialization");
+    bool initBefore = VFI_CrossingInitialized;
+    int crossingResult = DetectVFICrossing();
+    bool initAfter = VFI_CrossingInitialized;
+    
+    Print("  Initialized before: ", initBefore ? "YES" : "NO");
+    Print("  Initialized after: ", initAfter ? "YES" : "NO");
+    Print("  Initial crossing result: ", crossingResult);
+    
+    // Тест 4: Проверка текущих значений VFI
+    Print("Test 4: Current VFI values");
+    double currentVFI = CalculateVFI(0);
+    double currentEMA = GetVFI_EMA(0);
+    
+    Print("  Current VFI: ", NormalizeDouble(currentVFI, 4));
+    Print("  Current EMA: ", NormalizeDouble(currentEMA, 4));
+    Print("  VFI > EMA: ", currentVFI > currentEMA ? "YES" : "NO");
+    
+    // Тест 5: Проверка фильтра для обеих направлений
+    Print("Test 5: Filter conditions");
+    bool buyFilter = CheckVFIFilter(ORDER_TYPE_BUY);
+    bool sellFilter = CheckVFIFilter(ORDER_TYPE_SELL);
+    
+    Print("  Buy filter result: ", buyFilter ? "PASS" : "FAIL");
+    Print("  Sell filter result: ", sellFilter ? "PASS" : "FAIL");
+    
+    Print("=== VFI CROSSING SYSTEM TEST COMPLETED ===");
+}
+
+//+------------------------------------------------------------------+
 //| Обновление отслеживания пересечений VFI (вызывается каждый тик)  |
 //+------------------------------------------------------------------+
 void UpdateVFICrossing()
 {
     if(!UseVFIFilter) return;
     
-    // Получаем время текущего бара
+    // Защита от ошибок при получении времени бара
     datetime currentBarTime = iTime(_Symbol, PERIOD_CURRENT, 0);
+    if(currentBarTime <= 0)
+    {
+        Print("⚠️ UpdateVFICrossing: Invalid bar time, skipping update");
+        return;
+    }
     
     // Обновляем отслеживание пересечений только на новом баре
     if(currentBarTime != lastVFICrossingTime)
@@ -1228,7 +1304,15 @@ void UpdateVFICrossing()
         lastVFICrossingTime = currentBarTime;
         
         // Проверяем пересечение на каждом новом баре
-        DetectVFICrossing();
+        // Используем try-catch аналог через проверку результата
+        int crossingResult = DetectVFICrossing();
+        
+        if(crossingResult != 0)
+        {
+            Print("🎯 VFI Crossing detected on new bar: ", 
+                  crossingResult == 1 ? "BULLISH" : "BEARISH", 
+                  " at ", TimeToString(currentBarTime));
+        }
     }
     
     // Дополнительная отладочная информация каждый тик (только в режиме отладки)
@@ -1240,19 +1324,86 @@ void UpdateVFICrossing()
         // Выводим отладочную информацию не чаще раза в минуту
         if(currentTime - lastDebugTime >= 60)
         {
+            // Защищенное получение значений VFI
             double currentVFI = CalculateVFI(0);
             double currentVFI_EMA = GetVFI_EMA(0);
             
-            Print("🔍 VFI Debug Info:");
-            Print("  Current VFI: ", NormalizeDouble(currentVFI, 4));
-            Print("  Current EMA: ", NormalizeDouble(currentVFI_EMA, 4));
-            Print("  VFI > EMA: ", currentVFI > currentVFI_EMA ? "YES" : "NO");
-            Print("  Last crossing time: ", TimeToString(lastVFICrossingTime));
+            // Проверяем валидность полученных значений
+            if(currentVFI != 0.0 || currentVFI_EMA != 0.0)
+            {
+                Print("🔍 VFI Debug Info:");
+                Print("  Current VFI: ", NormalizeDouble(currentVFI, 4));
+                Print("  Current EMA: ", NormalizeDouble(currentVFI_EMA, 4));
+                Print("  VFI > EMA: ", currentVFI > currentVFI_EMA ? "YES" : "NO");
+                Print("  Last crossing time: ", TimeToString(lastVFICrossingTime));
+                Print("  Crossing initialized: ", VFI_CrossingInitialized ? "YES" : "NO");
+            }
+            else
+            {
+                Print("⚠️ VFI Debug: Invalid VFI values detected");
+            }
             
             lastDebugTime = currentTime;
         }
     }
 }
+//+------------------------------------------------------------------+
+//| Получение статуса системы пересечений VFI                        |
+//+------------------------------------------------------------------+
+void PrintVFICrossingStatus()
+{
+    if(!UseVFIFilter)
+    {
+        Print("VFI Filter is disabled");
+        return;
+    }
+    
+    Print("═══ VFI CROSSING SYSTEM STATUS ═══");
+    Print("Initialized: ", VFI_CrossingInitialized ? "YES" : "NO");
+    Print("Last crossing bar time: ", TimeToString(lastVFICrossingTime));
+    Print("Last buy notification: ", TimeToString(lastNotificationBuyTime));
+    Print("Last sell notification: ", TimeToString(lastNotificationSellTime));
+    
+    if(VFI_CrossingInitialized)
+    {
+        double currentVFI = CalculateVFI(0);
+        double currentEMA = GetVFI_EMA(0);
+        
+        Print("Current VFI: ", NormalizeDouble(currentVFI, 4));
+        Print("Current EMA: ", NormalizeDouble(currentEMA, 4));
+        Print("Stored prev VFI: ", NormalizeDouble(prevVFI, 4));
+        Print("Stored prev EMA: ", NormalizeDouble(prevVFI_EMA, 4));
+        
+        // Определяем текущее состояние
+        string currentState = "UNKNOWN";
+        if(currentVFI > currentEMA)
+            currentState = "VFI ABOVE EMA";
+        else if(currentVFI < currentEMA)
+            currentState = "VFI BELOW EMA";
+        else
+            currentState = "VFI EQUALS EMA";
+            
+        Print("Current state: ", currentState);
+        
+        // Показываем потенциальное направление пересечения
+        if(prevVFI != 0 && prevVFI_EMA != 0)
+        {
+            string potentialCrossing = "NONE";
+            if(prevVFI <= prevVFI_EMA && currentVFI > currentEMA)
+                potentialCrossing = "BULLISH CROSSING OCCURRED";
+            else if(prevVFI >= prevVFI_EMA && currentVFI < currentEMA)
+                potentialCrossing = "BEARISH CROSSING OCCURRED";
+            else if(prevVFI < prevVFI_EMA && currentVFI < currentEMA)
+                potentialCrossing = "POTENTIAL BULLISH SETUP";
+            else if(prevVFI > prevVFI_EMA && currentVFI > currentEMA)
+                potentialCrossing = "POTENTIAL BEARISH SETUP";
+                
+            Print("Crossing status: ", potentialCrossing);
+        }
+    }
+    Print("═══ END VFI CROSSING STATUS ═══");
+}
+
     
 void CheckForOpen()
 {
