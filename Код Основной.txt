@@ -532,6 +532,11 @@ bool isDayChanged = false;       // Флаг смены дня
 int CurrentTrailingStop = 0;     // Текущее значение trailing stop
 int CurrentTrailingStart = 0;    // Текущее значение начала trailing
 
+// VFI Crossover and Notification Control Variables
+datetime lastNotificationTime = 0;  // Время последнего уведомления
+double prevVFI = 0.0;              // Предыдущее значение VFI
+double prevVFI_EMA = 0.0;          // Предыдущее значение VFI EMA
+
 // ID объектов для отображения информации о новостях
 string newsLabelBase = "NewsInfo_";
 int newsLabelsCount = 0;
@@ -682,6 +687,37 @@ int OnInit()
         TestMACDCalculation();
     }
     
+    // Initialize VFI previous values for crossover detection
+    if(UseVFIFilter)
+    {
+        // Try to get previous values, with fallback to current values
+        double init_prev_vfi = CalculateVFI(1);  // Get previous bar VFI
+        double init_prev_vfi_ema = GetVFI_EMA(1); // Get previous bar VFI EMA
+        
+        // If previous bar calculation fails, use current bar
+        if(init_prev_vfi == 0.0 && init_prev_vfi_ema == 0.0)
+        {
+            init_prev_vfi = CalculateVFI(0);
+            init_prev_vfi_ema = GetVFI_EMA(0);
+            Print("WARNING: Could not get previous bar VFI values, using current bar");
+        }
+        
+        // Set global variables
+        prevVFI = init_prev_vfi;
+        prevVFI_EMA = init_prev_vfi_ema;
+        lastNotificationTime = 0; // Reset notification time
+        
+        Print("VFI Crossover System Initialized:");
+        Print("- Previous VFI: ", NormalizeDouble(prevVFI, 4));
+        Print("- Previous VFI EMA: ", NormalizeDouble(prevVFI_EMA, 4));
+        Print("- Notification time reset");
+        Print("- Crossover detection: ENABLED");
+    }
+    else
+    {
+        Print("VFI Filter disabled - Crossover detection: DISABLED");
+    }
+    
     return(INIT_SUCCEEDED);
     
     // Проверка наличия файла новостей для текущего месяца
@@ -782,6 +818,103 @@ double GetVFI_EMA(int index)
 }
 
 //+------------------------------------------------------------------+
+//| Check if current candle is new (for notification control)       |
+//+------------------------------------------------------------------+
+bool IsNewCandle()
+{
+    datetime currentCandleTime = iTime(_Symbol, PERIOD_CURRENT, 0);
+    
+    // Handle invalid time
+    if(currentCandleTime <= 0)
+    {
+        Print("WARNING: Invalid candle time in IsNewCandle(). Allowing notification.");
+        return true;
+    }
+    
+    // First notification or different candle
+    if(lastNotificationTime == 0 || currentCandleTime != lastNotificationTime)
+    {
+        Print("IsNewCandle Debug - New candle detected: ", TimeToString(currentCandleTime), 
+              " (Last: ", TimeToString(lastNotificationTime), ")");
+        return true;
+    }
+    
+    Print("IsNewCandle Debug - Same candle: ", TimeToString(currentCandleTime));
+    return false;
+}
+
+//+------------------------------------------------------------------+
+//| Check VFI crossover condition                                   |
+//+------------------------------------------------------------------+
+bool CheckVFICrossover(ENUM_ORDER_TYPE orderType)
+{
+    if(!UseVFIFilter) return true;
+    
+    // Validate VFI parameters
+    if(VFI_Length <= 0 || VFI_SignalLength <= 0 || VFI_Coef <= 0 || VFI_VCoef <= 0)
+    {
+        Print("ERROR: Invalid VFI parameters for crossover check. Filter disabled.");
+        return true;
+    }
+    
+    double vfi_current = CalculateVFI(0);
+    double vfi_ema_current = GetVFI_EMA(0);
+    
+    // Check for invalid values
+    if(vfi_current == 0.0 && vfi_ema_current == 0.0)
+    {
+        Print("WARNING: VFI crossover calculation returned zero values. Allowing trade.");
+        return true;
+    }
+    
+    // Handle first run when previous values are not set
+    if(prevVFI == 0.0 && prevVFI_EMA == 0.0)
+    {
+        Print("VFI Crossover Debug - First run, no previous values. No crossover detected.");
+        return false;
+    }
+    
+    bool crossover_detected = false;
+    
+    if(orderType == ORDER_TYPE_BUY)
+    {
+        // Check for bullish crossover: VFI crosses above EMA
+        if(prevVFI <= prevVFI_EMA && vfi_current > vfi_ema_current)
+        {
+            crossover_detected = true;
+            Print("VFI Crossover Debug - BUY Signal: VFI crossed above EMA");
+            Print("Previous: VFI=", NormalizeDouble(prevVFI, 4), " EMA=", NormalizeDouble(prevVFI_EMA, 4));
+            Print("Current: VFI=", NormalizeDouble(vfi_current, 4), " EMA=", NormalizeDouble(vfi_ema_current, 4));
+        }
+        else
+        {
+            Print("VFI Crossover Debug - BUY: No crossover. Prev VFI ", 
+                  (prevVFI <= prevVFI_EMA ? "below/equal" : "above"), " EMA, Curr VFI ", 
+                  (vfi_current > vfi_ema_current ? "above" : "below/equal"), " EMA");
+        }
+    }
+    else if(orderType == ORDER_TYPE_SELL)
+    {
+        // Check for bearish crossover: VFI crosses below EMA
+        if(prevVFI >= prevVFI_EMA && vfi_current < vfi_ema_current)
+        {
+            crossover_detected = true;
+            Print("VFI Crossover Debug - SELL Signal: VFI crossed below EMA");
+            Print("Previous: VFI=", NormalizeDouble(prevVFI, 4), " EMA=", NormalizeDouble(prevVFI_EMA, 4));
+            Print("Current: VFI=", NormalizeDouble(vfi_current, 4), " EMA=", NormalizeDouble(vfi_ema_current, 4));
+        }
+        else
+        {
+            Print("VFI Crossover Debug - SELL: No crossover. Prev VFI ", 
+                  (prevVFI >= prevVFI_EMA ? "above/equal" : "below"), " EMA, Curr VFI ", 
+                  (vfi_current < vfi_ema_current ? "below" : "above/equal"), " EMA");
+        }
+    }
+    
+    return crossover_detected;
+}
+
+//+------------------------------------------------------------------+
 //| Check VFI filter condition                                       |
 //+------------------------------------------------------------------+
 bool CheckVFIFilter(ENUM_ORDER_TYPE orderType)
@@ -795,6 +928,13 @@ bool CheckVFIFilter(ENUM_ORDER_TYPE orderType)
         return true; // Allow trading if parameters are invalid
     }
     
+    // Check if this is a new candle to prevent duplicate notifications
+    if(!IsNewCandle())
+    {
+        Print("VFI Filter Debug - Same candle notification blocked: ", TimeToString(iTime(_Symbol, PERIOD_CURRENT, 0)));
+        return false; // Block trading on same candle
+    }
+    
     double vfi_current = CalculateVFI(0);
     double vfi_ema = GetVFI_EMA(0);
     
@@ -802,9 +942,28 @@ bool CheckVFIFilter(ENUM_ORDER_TYPE orderType)
     if(vfi_current == 0.0 && vfi_ema == 0.0)
     {
         Print("WARNING: VFI calculation returned zero values. Allowing trade.");
+        // Update previous values even on error
+        prevVFI = vfi_current;
+        prevVFI_EMA = vfi_ema;
         return true; // Allow trading if calculation fails
     }
     
+    // Check crossover condition
+    bool crossover_condition = CheckVFICrossover(orderType);
+    
+    if(!crossover_condition)
+    {
+        // Update previous values for next comparison
+        prevVFI = vfi_current;
+        prevVFI_EMA = vfi_ema;
+        
+        Print("VFI Filter Debug - No crossover detected for ", EnumToString(orderType));
+        Print("Current: VFI=", NormalizeDouble(vfi_current, 4), " EMA=", NormalizeDouble(vfi_ema, 4));
+        Print("Previous: VFI=", NormalizeDouble(prevVFI, 4), " EMA=", NormalizeDouble(prevVFI_EMA, 4));
+        return false;
+    }
+    
+    // Additional condition checks (original logic)
     bool vfi_condition = false;
     
     if(orderType == ORDER_TYPE_BUY)
@@ -834,6 +993,24 @@ bool CheckVFIFilter(ENUM_ORDER_TYPE orderType)
         }
     }
     
+    // If all conditions are met, update notification time and previous values
+    if(crossover_condition && vfi_condition)
+    {
+        lastNotificationTime = iTime(_Symbol, PERIOD_CURRENT, 0);
+        prevVFI = vfi_current;
+        prevVFI_EMA = vfi_ema;
+        
+        Print("VFI Filter Debug - SIGNAL APPROVED for ", EnumToString(orderType));
+        Print("Crossover: YES, Additional conditions: YES");
+        Print("Current: VFI=", NormalizeDouble(vfi_current, 4), " EMA=", NormalizeDouble(vfi_ema, 4));
+        Print("Notification time set to: ", TimeToString(lastNotificationTime));
+        return true;
+    }
+    
+    // Update previous values for next comparison
+    prevVFI = vfi_current;
+    prevVFI_EMA = vfi_ema;
+    
     // Log VFI values for debugging
     if(UseVFIFilter)
     {
@@ -841,10 +1018,12 @@ bool CheckVFIFilter(ENUM_ORDER_TYPE orderType)
               " EMA: ", NormalizeDouble(vfi_ema, 4),
               " Order: ", EnumToString(orderType),
               " Mode: ", VFI_StrictMode ? "Strict" : "Soft",
-              " Condition: ", vfi_condition ? "PASS" : "FAIL");
+              " Crossover: ", crossover_condition ? "YES" : "NO",
+              " Additional: ", vfi_condition ? "YES" : "NO",
+              " Final: FAIL");
     }
     
-    return vfi_condition;
+    return false;
 }
 
 //+------------------------------------------------------------------+
