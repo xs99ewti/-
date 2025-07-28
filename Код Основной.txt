@@ -532,6 +532,11 @@ bool isDayChanged = false;       // Флаг смены дня
 int CurrentTrailingStop = 0;     // Текущее значение trailing stop
 int CurrentTrailingStart = 0;    // Текущее значение начала trailing
 
+// VFI уведомления и пересечения
+datetime lastNotificationTime = 0;  // Время последнего уведомления
+double prevVFI = 0.0;              // Предыдущее значение VFI
+double prevVFI_EMA = 0.0;          // Предыдущее значение VFI EMA
+
 // ID объектов для отображения информации о новостях
 string newsLabelBase = "NewsInfo_";
 int newsLabelsCount = 0;
@@ -668,6 +673,20 @@ int OnInit()
     Print("EA initialized successfully. StopLoss=", StopLoss, " points");
     initialBalance = AccountInfoDouble(ACCOUNT_BALANCE);
     
+    // Инициализация переменных VFI
+    prevVFI = 0.0;
+    prevVFI_EMA = 0.0;
+    lastNotificationTime = 0;
+    
+    // Получение начальных значений VFI
+    if(UseVFIFilter)
+    {
+        prevVFI = CalculateVFI(1);  // Получаем значение с предыдущей свечи
+        prevVFI_EMA = GetVFI_EMA(1);
+        Print("VFI initialization - Previous VFI: ", NormalizeDouble(prevVFI, 4), 
+              " Previous EMA: ", NormalizeDouble(prevVFI_EMA, 4));
+    }
+    
     // Test VFI calculation if enabled
     if(UseVFIFilter)
     {
@@ -782,27 +801,103 @@ double GetVFI_EMA(int index)
 }
 
 //+------------------------------------------------------------------+
+//| Проверка новой свечи                                            |
+//+------------------------------------------------------------------+
+bool IsNewCandle()
+{
+    datetime currentBarTime = iTime(_Symbol, PERIOD_CURRENT, 0);
+    
+    if(currentBarTime != lastNotificationTime)
+    {
+        return true;
+    }
+    
+    return false;
+}
+
+//+------------------------------------------------------------------+
+//| Проверка пересечения VFI и EMA                                  |
+//+------------------------------------------------------------------+
+bool CheckVFICrossover(ENUM_ORDER_TYPE orderType)
+{
+    double currentVFI = CalculateVFI(0);
+    double currentVFI_EMA = GetVFI_EMA(0);
+    
+    // Проверяем валидность значений
+    if(currentVFI == 0.0 && currentVFI_EMA == 0.0)
+    {
+        return false;
+    }
+    
+    bool crossover = false;
+    
+    if(orderType == ORDER_TYPE_BUY)
+    {
+        // Бычий сигнал: VFI пересекает EMA снизу вверх
+        crossover = (prevVFI <= prevVFI_EMA && currentVFI > currentVFI_EMA);
+        
+    }
+    else if(orderType == ORDER_TYPE_SELL)
+    {
+        // Медвежий сигнал: VFI пересекает EMA сверху вниз
+        crossover = (prevVFI >= prevVFI_EMA && currentVFI < currentVFI_EMA);
+    }
+    
+    // Логирование для отладки
+    if(UseVFIFilter)
+    {
+        Print("VFI Crossover Check - Current VFI: ", NormalizeDouble(currentVFI, 4),
+              " Previous VFI: ", NormalizeDouble(prevVFI, 4),
+              " Current EMA: ", NormalizeDouble(currentVFI_EMA, 4),
+              " Previous EMA: ", NormalizeDouble(prevVFI_EMA, 4),
+              " Order: ", EnumToString(orderType),
+              " Crossover: ", crossover ? "YES" : "NO");
+    }
+    
+    return crossover;
+}
+
+//+------------------------------------------------------------------+
 //| Check VFI filter condition                                       |
 //+------------------------------------------------------------------+
 bool CheckVFIFilter(ENUM_ORDER_TYPE orderType)
 {
     if(!UseVFIFilter) return true;
     
-    // Validate VFI parameters
+    // Проверка уникальности свечи
+    if(!IsNewCandle())
+    {
+        Print("VFI Filter: Notification already sent for current candle");
+        return false;
+    }
+    
+    // Валидация параметров VFI
     if(VFI_Length <= 0 || VFI_SignalLength <= 0 || VFI_Coef <= 0 || VFI_VCoef <= 0)
     {
         Print("ERROR: Invalid VFI parameters. Filter disabled for this signal.");
-        return true; // Allow trading if parameters are invalid
+        return true; // Разрешаем торговлю при неправильных параметрах
     }
     
     double vfi_current = CalculateVFI(0);
     double vfi_ema = GetVFI_EMA(0);
     
-    // Check for invalid values
+    // Проверка недопустимых значений
     if(vfi_current == 0.0 && vfi_ema == 0.0)
     {
         Print("WARNING: VFI calculation returned zero values. Allowing trade.");
-        return true; // Allow trading if calculation fails
+        return true; // Разрешаем торговлю при ошибке вычисления
+    }
+    
+    // Проверка пересечения линий
+    bool crossover_condition = CheckVFICrossover(orderType);
+    if(!crossover_condition)
+    {
+        // Обновляем предыдущие значения даже если нет пересечения
+        prevVFI = vfi_current;
+        prevVFI_EMA = vfi_ema;
+        
+        Print("VFI Filter: No crossover detected for ", EnumToString(orderType));
+        return false;
     }
     
     bool vfi_condition = false;
@@ -811,12 +906,12 @@ bool CheckVFIFilter(ENUM_ORDER_TYPE orderType)
     {
         if(VFI_StrictMode)
         {
-            // Strict mode: VFI must be above EMA AND above zero
+            // Строгий режим: VFI должно быть выше EMA И выше нуля
             vfi_condition = (vfi_current > vfi_ema && vfi_current > 0.0);
         }
         else
         {
-            // Soft mode: VFI above EMA OR above zero
+            // Мягкий режим: VFI выше EMA ИЛИ выше нуля
             vfi_condition = (vfi_current > vfi_ema || vfi_current > 0.0);
         }
     }
@@ -824,24 +919,31 @@ bool CheckVFIFilter(ENUM_ORDER_TYPE orderType)
     {
         if(VFI_StrictMode)
         {
-            // Strict mode: VFI must be below EMA AND below zero
+            // Строгий режим: VFI должно быть ниже EMA И ниже нуля
             vfi_condition = (vfi_current < vfi_ema && vfi_current < 0.0);
         }
         else
         {
-            // Soft mode: VFI below EMA OR below zero
+            // Мягкий режим: VFI ниже EMA ИЛИ ниже нуля
             vfi_condition = (vfi_current < vfi_ema || vfi_current < 0.0);
         }
     }
     
-    // Log VFI values for debugging
+    // Обновляем предыдущие значения и время уведомления
+    prevVFI = vfi_current;
+    prevVFI_EMA = vfi_ema;
+    lastNotificationTime = iTime(_Symbol, PERIOD_CURRENT, 0);
+    
+    // Логирование VFI значений для отладки
     if(UseVFIFilter)
     {
-        Print("VFI Filter Check - Current: ", NormalizeDouble(vfi_current, 4), 
+        Print("VFI Filter Final Check - Current: ", NormalizeDouble(vfi_current, 4), 
               " EMA: ", NormalizeDouble(vfi_ema, 4),
               " Order: ", EnumToString(orderType),
               " Mode: ", VFI_StrictMode ? "Strict" : "Soft",
-              " Condition: ", vfi_condition ? "PASS" : "FAIL");
+              " Crossover: YES",
+              " Final Condition: ", vfi_condition ? "PASS" : "FAIL",
+              " Notification Time: ", TimeToString(lastNotificationTime, TIME_DATE|TIME_MINUTES));
     }
     
     return vfi_condition;
