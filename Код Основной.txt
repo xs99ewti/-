@@ -532,6 +532,10 @@ bool isDayChanged = false;       // Флаг смены дня
 int CurrentTrailingStop = 0;     // Текущее значение trailing stop
 int CurrentTrailingStart = 0;    // Текущее значение начала trailing
 
+// Переменные для отслеживания уведомлений
+datetime lastVFISignalTime_Buy = 0;    // Время последнего сигнала на покупку
+datetime lastVFISignalTime_Sell = 0;   // Время последнего сигнала на продажу
+
 // ID объектов для отображения информации о новостях
 string newsLabelBase = "NewsInfo_";
 int newsLabelsCount = 0;
@@ -782,9 +786,9 @@ double GetVFI_EMA(int index)
 }
 
 //+------------------------------------------------------------------+
-//| Check VFI filter condition                                       |
+//| Check VFI crossover condition                                    |
 //+------------------------------------------------------------------+
-bool CheckVFIFilter(ENUM_ORDER_TYPE orderType)
+bool CheckVFICrossover(ENUM_ORDER_TYPE orderType)
 {
     if(!UseVFIFilter) return true;
     
@@ -795,56 +799,108 @@ bool CheckVFIFilter(ENUM_ORDER_TYPE orderType)
         return true; // Allow trading if parameters are invalid
     }
     
+    // Get current and previous VFI and EMA values
     double vfi_current = CalculateVFI(0);
-    double vfi_ema = GetVFI_EMA(0);
+    double vfi_previous = CalculateVFI(1);
+    double vfi_ema_current = GetVFI_EMA(0);
+    double vfi_ema_previous = GetVFI_EMA(1);
     
     // Check for invalid values
-    if(vfi_current == 0.0 && vfi_ema == 0.0)
+    if(vfi_current == 0.0 && vfi_ema_current == 0.0)
     {
         Print("WARNING: VFI calculation returned zero values. Allowing trade.");
         return true; // Allow trading if calculation fails
     }
     
-    bool vfi_condition = false;
+    if(vfi_previous == 0.0 && vfi_ema_previous == 0.0)
+    {
+        Print("WARNING: Previous VFI calculation returned zero values. Allowing trade.");
+        return true; // Allow trading if calculation fails
+    }
+    
+    bool crossover_condition = false;
     
     if(orderType == ORDER_TYPE_BUY)
     {
-        if(VFI_StrictMode)
+        // Buy signal: VFI crosses above EMA (was below or equal, now above)
+        crossover_condition = (vfi_previous <= vfi_ema_previous && vfi_current > vfi_ema_current);
+        
+        // Additional condition in strict mode: VFI must also be above zero
+        if(VFI_StrictMode && crossover_condition)
         {
-            // Strict mode: VFI must be above EMA AND above zero
-            vfi_condition = (vfi_current > vfi_ema && vfi_current > 0.0);
-        }
-        else
-        {
-            // Soft mode: VFI above EMA OR above zero
-            vfi_condition = (vfi_current > vfi_ema || vfi_current > 0.0);
+            crossover_condition = crossover_condition && (vfi_current > 0.0);
         }
     }
     else if(orderType == ORDER_TYPE_SELL)
     {
-        if(VFI_StrictMode)
+        // Sell signal: VFI crosses below EMA (was above or equal, now below)
+        crossover_condition = (vfi_previous >= vfi_ema_previous && vfi_current < vfi_ema_current);
+        
+        // Additional condition in strict mode: VFI must also be below zero
+        if(VFI_StrictMode && crossover_condition)
         {
-            // Strict mode: VFI must be below EMA AND below zero
-            vfi_condition = (vfi_current < vfi_ema && vfi_current < 0.0);
-        }
-        else
-        {
-            // Soft mode: VFI below EMA OR below zero
-            vfi_condition = (vfi_current < vfi_ema || vfi_current < 0.0);
+            crossover_condition = crossover_condition && (vfi_current < 0.0);
         }
     }
     
-    // Log VFI values for debugging
+    // Log VFI crossover check for debugging
     if(UseVFIFilter)
     {
-        Print("VFI Filter Check - Current: ", NormalizeDouble(vfi_current, 4), 
-              " EMA: ", NormalizeDouble(vfi_ema, 4),
+        Print("VFI Crossover Check - Current: ", NormalizeDouble(vfi_current, 4), 
+              " Previous: ", NormalizeDouble(vfi_previous, 4),
+              " EMA Current: ", NormalizeDouble(vfi_ema_current, 4),
+              " EMA Previous: ", NormalizeDouble(vfi_ema_previous, 4),
               " Order: ", EnumToString(orderType),
               " Mode: ", VFI_StrictMode ? "Strict" : "Soft",
-              " Condition: ", vfi_condition ? "PASS" : "FAIL");
+              " Crossover: ", crossover_condition ? "YES" : "NO");
     }
     
-    return vfi_condition;
+    return crossover_condition;
+}
+
+//+------------------------------------------------------------------+
+//| Check VFI filter condition                                       |
+//+------------------------------------------------------------------+
+bool CheckVFIFilter(ENUM_ORDER_TYPE orderType)
+{
+    if(!UseVFIFilter) return true;
+    
+    // Check if crossover condition is met
+    bool crossover_detected = CheckVFICrossover(orderType);
+    if(!crossover_detected) return false;
+    
+    // Get current candle time
+    datetime currentBarTime = iTime(_Symbol, PERIOD_CURRENT, 0);
+    
+    // Check if we already sent a notification for this candle and signal type
+    if(orderType == ORDER_TYPE_BUY)
+    {
+        if(lastVFISignalTime_Buy == currentBarTime)
+        {
+            Print("VFI Buy signal already sent for current candle at ", TimeToString(currentBarTime));
+            return false; // Prevent duplicate notifications on same candle
+        }
+        
+        // Update last signal time for buy
+        lastVFISignalTime_Buy = currentBarTime;
+        
+        Print("VFI Buy crossover signal generated at ", TimeToString(currentBarTime));
+    }
+    else if(orderType == ORDER_TYPE_SELL)
+    {
+        if(lastVFISignalTime_Sell == currentBarTime)
+        {
+            Print("VFI Sell signal already sent for current candle at ", TimeToString(currentBarTime));
+            return false; // Prevent duplicate notifications on same candle
+        }
+        
+        // Update last signal time for sell
+        lastVFISignalTime_Sell = currentBarTime;
+        
+        Print("VFI Sell crossover signal generated at ", TimeToString(currentBarTime));
+    }
+    
+    return true;
 }
 
 //+------------------------------------------------------------------+
